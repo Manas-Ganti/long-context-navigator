@@ -2,7 +2,8 @@
 # Offline inference on ARC: LLM baselines and evaluation through vLLM. One GPU
 # is enough for a 7B policy (TP=1); the 7B-class model fits on an A100-80 or H200.
 #
-#   JOB=baselines sbatch ... scripts/arc_infer.slurm                    # base model, 3 conditions
+#   JOB=baselines sbatch ... scripts/arc_infer.slurm                    # base model, 3 conditions, answer-only
+#   JOB=baselines REASONING=1 sbatch ... scripts/arc_infer.slurm        # same, model may reason first
 #   JOB=eval      sbatch ... scripts/arc_infer.slurm                    # base model through the env
 #   JOB=eval ADAPTER=checkpoints/v1/sft-qwen2.5-7b-instruct sbatch ...  # SFT policy
 #   JOB=eval ADAPTER=checkpoints/v1/grpo-qwen2.5-7b-instruct TAG=grpo sbatch ...
@@ -39,8 +40,8 @@ mkdir -p "results/${LCN_DATA}"
 case "$JOB" in
   baselines)
     "$PY" -m longctx.cli baselines --mode llm --backend vllm --model "$MODEL" --tp "$TP" \
-      ${ADAPTER:+--adapter "$ADAPTER"} --instances $INSTANCES \
-      --out "results/${LCN_DATA}/baselines_llm_${TAG}.json" "$@"
+      ${ADAPTER:+--adapter "$ADAPTER"} --instances $INSTANCES ${REASONING:+--reasoning} \
+      --out "results/${LCN_DATA}/baselines_llm_${TAG}${REASONING:+_reasoning}.json" "$@"
     ;;
   eval)
     "$PY" -m longctx.cli evaluate --policy llm --backend vllm --model "$MODEL" --tp "$TP" \

@@ -109,7 +109,8 @@ def cmd_baselines(args):
 
         tcfg = load_train_config(args.config)
         backend = build_backend(args.backend, args.model or tcfg.model, args.adapter, tensor_parallel_size=args.tp)
-        llm = llm_baselines(insts, backend, batch_size=args.batch_size, seed=args.seed)
+        llm = llm_baselines(insts, backend, batch_size=args.batch_size, seed=args.seed,
+                            reasoning=args.reasoning, max_new_tokens=512 if args.reasoning else 24)
     table = baseline_table(mech, llm)
     print(table)
     out = resolve_path(args.out)
@@ -208,6 +209,7 @@ def main(argv=None):
     p.add_argument("--adapter", default=None)
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--reasoning", action="store_true", help="let the model think before ANSWER: (512 tokens)")
     p.add_argument("--out", default="results/baselines.json")
     p.set_defaults(fn=cmd_baselines)
 
