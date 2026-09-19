@@ -6,7 +6,9 @@
     ANSWER <text>
 
 ids are chunk indices (integers) or summary ids (S1, S2, ...), separated by
-commas or spaces, optionally in brackets. The parser takes the LAST line that
+commas or spaces, optionally in brackets. Text after the ids (a copied map
+line, a stray '·' or '::') is ignored for READ and DROP; for COMPRESS the
+summary is everything after the first '::'. The parser takes the LAST line that
 starts with 'ACTION:' together with any lines after it (so a summary may run
 on), or the last non-empty line if no such prefix exists — a policy may write
 a THOUGHT line first.
@@ -43,16 +45,26 @@ class ParseError(ValueError):
     pass
 
 
+_ID_TOKEN = re.compile(r"^(?:S\d+|\d+)", re.IGNORECASE)
+
+
 def _parse_ids(s: str) -> list[str]:
-    s = s.strip().strip("[]()")
-    parts = [p for p in re.split(r"[,\s]+", s) if p]
-    if not parts:
-        raise ParseError("no ids given")
+    """Leading ids, separated by commas/spaces, optionally bracketed. Anything
+    after the ids is ignored: the base model tends to copy the map line
+    ('READ 20 :: Project Register · Coral Curlew – ...'), and rejecting that
+    punishes verbosity, not navigation."""
     out = []
-    for p in parts:
-        if not _ID.match(p):
-            raise ParseError(f"bad id {p!r}")
-        out.append(p.upper() if p[0] in "sS" else str(int(p)))
+    for p in re.split(r"[,\s]+", s.strip()):
+        p = p.strip("[]()")
+        if not p:
+            continue
+        m = _ID_TOKEN.match(p)
+        if not m or (len(p) > len(m.group(0)) and p[len(m.group(0))] not in "]),"):
+            break
+        tok = m.group(0)
+        out.append(tok.upper() if tok[0] in "sS" else str(int(tok)))
+    if not out:
+        raise ParseError(f"no ids in {s.strip()[:40]!r}")
     return out
 
 
@@ -73,9 +85,9 @@ def parse_action(text: str) -> Action:
     kind, rest = m.group(1).upper(), m.group(2).strip()
     if kind == READ:
         ids = _parse_ids(rest)
-        if len(ids) != 1 or ids[0].startswith("S"):
-            raise ParseError("READ takes exactly one chunk id")
-        return Action(READ, ids)
+        if ids[0].startswith("S"):
+            raise ParseError("READ takes a chunk id, not a summary id")
+        return Action(READ, ids[:1])          # trailing description (or extra ids) ignored
     if kind == DROP:
         return Action(DROP, _parse_ids(rest))
     if kind == COMPRESS:

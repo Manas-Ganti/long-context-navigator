@@ -83,7 +83,7 @@ class LoraConfig(BaseModel):
 
 
 class GenerationConfig(BaseModel):
-    max_new_tokens: int = 160
+    max_new_tokens: int = 256
     temperature: float = 0.8
     top_p: float = 0.95
 

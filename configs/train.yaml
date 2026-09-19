@@ -11,7 +11,8 @@ lora:
   target: all-linear      # attn | all-linear
 
 generation:
-  max_new_tokens: 160     # THOUGHT + ACTION line; summaries are capped separately
+  max_new_tokens: 256     # THOUGHT + ACTION line; summaries are capped separately. The base model writes
+                          # long thoughts and lost its ACTION line at 160 in ~5% of steps
   temperature: 0.8
   top_p: 0.95
 
