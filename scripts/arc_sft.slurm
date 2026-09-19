@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Stage 1 — SFT on teacher trajectories. One node, data-parallel, LoRA, ZeRO-2.
+# Stage 1 — SFT on teacher trajectories. One node, data-parallel, LoRA.
 #
-#   sbatch --gres=gpu:h200:4 ... scripts/arc_sft.slurm
+#   sbatch --gres=gpu:a100:4 ... scripts/arc_sft.slurm
 #   EPOCHS=1 sbatch ... scripts/arc_sft.slurm --max-steps 50     # calibration
+#   DS=configs/deepspeed_zero2.json sbatch ...                   # opt-in ZeRO-2
+#
+# Plain DDP by default: a 7B + LoRA fits an 80 GB card, and DeepSpeed's fused
+# ops JIT-compile against nvcc, which the compute nodes do not expose.
 #
 # Teacher rows are built on the login node first (CPU only):
 #   longctx teacher --instances data/v1/train.jsonl --out data/v1/sft.jsonl
@@ -25,11 +29,11 @@ trap arc_notify_finish EXIT
 arc_notify "<b>START</b> sft ${SLURM_JOB_ID:-?} · ${LCN_DATA:-?} · ${SLURM_JOB_NODELIST:-?}"
 
 MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
-DS="${DS:-configs/deepspeed_zero2.json}"
+DS="${DS:-}"
 TAG="$(echo "$MODEL" | tr '[:upper:]' '[:lower:]' | sed 's|.*/||')"
 
 arc_torchrun -m longctx.train_sft \
-  --model "$MODEL" --deepspeed "$DS" \
+  --model "$MODEL" ${DS:+--deepspeed "$DS"} \
   --sft-data "data/${LCN_DATA}/sft.jsonl" \
   --out "checkpoints/${LCN_DATA}/sft-${TAG}" \
   ${EPOCHS:+--epochs "$EPOCHS"} ${LR:+--learning-rate "$LR"} \
