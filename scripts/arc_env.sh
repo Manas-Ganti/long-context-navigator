@@ -23,7 +23,13 @@ export LCN_DATA="${LCN_DATA:-v1}"
 # Model weights are tens to hundreds of GB — keep the HF cache on project/scratch
 # storage, never in $HOME (small quota, and it is not purged-but-fast storage).
 export HF_HOME="${HF_HOME:-/projects/$USER/hf_cache}"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_XET_HIGH_PERFORMANCE=1        # was HF_HUB_ENABLE_HF_TRANSFER; hf_transfer is retired
+# vLLM's default top-k/top-p sampler is FlashInfer, which JIT-compiles its
+# kernel on first use and needs nvcc. The compute nodes do not expose one
+# (RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda'
+# doesn't exist — raised during engine warm-up, after the weights are loaded,
+# on both of the first two 1-GPU jobs). Use the PyTorch-native sampler instead.
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 export TRANSFORMERS_VERBOSITY=warning
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
@@ -154,6 +160,18 @@ arc_notify_finish() {
 #
 module reset >/dev/null 2>&1 || true
 module load Miniforge3 >/dev/null 2>&1 || module load Anaconda3 >/dev/null 2>&1 || true
+# Best effort: if the node offers a CUDA toolkit module, expose nvcc/CUDA_HOME so
+# anything that insists on JIT-compiling (FlashInfer, DeepSpeed ops) can. Not
+# required by the default path above; harmless when absent.
+if ! command -v nvcc >/dev/null 2>&1; then
+  module load CUDA >/dev/null 2>&1 || module load cuda >/dev/null 2>&1 || true
+fi
+if command -v nvcc >/dev/null 2>&1; then
+  export CUDA_HOME="${CUDA_HOME:-$(dirname "$(dirname "$(command -v nvcc)")")}"
+  echo "[arc_env] nvcc=$(command -v nvcc) CUDA_HOME=$CUDA_HOME"
+else
+  echo "[arc_env] no nvcc on $(hostname); FlashInfer JIT disabled (VLLM_USE_FLASHINFER_SAMPLER=$VLLM_USE_FLASHINFER_SAMPLER)"
+fi
 
 export CONDA_ENV="${CONDA_ENV:-lcn}"
 if [ -x "$CONDA_ENV/bin/python" ]; then
