@@ -12,11 +12,11 @@ it was trained on — or does it learn to find one lucky chunk and guess? The ba
 audit exist so that the answer is trustworthy in either direction.
 
 **Status.** Generator, validator, environment, reward, baselines, audit, teacher, SFT and GRPO
-trainers, evaluation and the ARC launchers are built and tested (`pytest`: 93 tests, no GPU).
-Everything below that needed no model has been run and is reported. **No LLM has been run yet**
-— the LLM baseline row, the SFT/GRPO policy and the OOD curve are pending the cluster runs in
-[Running on ARC](#running-on-arc). Nothing in this file is a placeholder; every number came
-from a command listed next to it.
+trainers, evaluation and the ARC launchers are built and tested (`pytest`: 100 tests, no GPU).
+Everything model-free has been run and is reported, and so have the **LLM baselines and the
+untrained base model through the environment** (Qwen2.5-7B-Instruct, one A100). **SFT and GRPO
+have not been run yet** — those rows and the OOD curve are pending. Nothing in this file is a
+placeholder; every number came from a command listed next to it.
 
 ---
 
@@ -181,8 +181,43 @@ Reference policies through the environment (`longctx evaluate --policy ...`, sam
 
 The noise-free oracle solves every instance in exactly `min_steps` (`tests/test_baselines.py`),
 which is the check that the environment, the recorded evidence and the per-instance minimum
-agree. The LLM versions of the three conditions (`--mode llm`, `JOB=baselines` on ARC) are the
-row that must be printed here **before** any trained number, and they have not been run yet.
+agree.
+
+### LLM baselines — Qwen2.5-7B-Instruct, untrained, greedy (`JOB=baselines`, 1×A100)
+
+Same 600 held-out instances, two prompt regimes: *answer-only* (24 output tokens, the value
+and nothing else) and *reasoning* (think step by step, then `ANSWER: <value>`, 512 tokens).
+
+| condition | answer-only | reasoning | reasoning by n_hops (2 / 3 / 4 / 5) | abstains (reasoning) |
+|---|---|---|---|---|
+| **no-read** | **0.000** | **0.000** | 0 / 0 / 0 / 0 | 82% |
+| **single-chunk oracle** | **0.010** | **0.000** | 0 / 0 / 0 / 0 | 98% |
+| **full-document oracle** | **0.295** | **0.795** | 0.944 / 0.931 / 0.761 / 0.532 | 0% |
+
+All three gates hold. The answer-only full-document number (0.295; 0.63 at 2 hops, ~0.2 beyond)
+is what one-shot composition costs a 7B: asked for the value alone it cannot follow a 3-hop
+chain through superseded values and near-miss twins in a single forward pass. Given room to
+reason it can (0.795), which is the fair ceiling and the one the trained policy is measured
+against. Two things to carry forward: 16% of its reasoning full-document answers are a known
+distractor value, so the traps bite a model that *is* reading; and accuracy falls with depth even
+with every evidence chunk in view — 4–5 hops are harder for the model itself, not only OOD for
+the policy.
+
+### The untrained model inside the environment (`JOB=eval`, 1×A100)
+
+| policy | accuracy | ceiling violations | budget exhausted | reads / min reads | COMPRESS use | fact retention |
+|---|---|---|---|---|---|---|
+| Qwen2.5-7B-Instruct, no training | **0.000** | 0.570 | 0.040 | 0.36 | 0.14 | 0.868 |
+
+It reached the answer chunk in **1 of 600** episodes. It reads the project entry and stops: 159
+of its 234 answers are the lead's *name* (the hop-0 bridge), the rest the project's own code or
+"not provided"; the other 57% of episodes die reading a second chunk without compressing first.
+The first run of this eval scored the same 0.000 for a different reason — 7,006 of 8,077 actions
+were rejected by a parser that refused `READ 20 :: <copied map line>`. That was interface
+strictness, not navigation failure, and the parser now ignores text after the ids
+(`tests/test_actions.py`). The number above is from the re-run. This is the "before" row: the
+model can operate the interface but does not follow the chain, does not compress on purpose, and
+never composes — exactly what the teacher trajectories demonstrate.
 
 ---
 
@@ -250,7 +285,7 @@ means the policy learned patterns rather than composition, and that would be a l
 
 ```bash
 pip install -e ".[test]"
-pytest                                                     # 93 tests
+pytest                                                     # 100 tests
 longctx generate --out data/v1                             # ~2 min; exits 1 on a confound
 longctx baselines --instances data/v1/id_test.jsonl data/v1/ood_test.jsonl
 longctx teacher  --instances data/v1/train.jsonl --out data/v1/sft.jsonl
@@ -304,7 +339,7 @@ src/longctx/
   teacher.py            rejection sampling + leak filter -> SFT rows
   llm.py / common.py    HF + vLLM backends, LoRA/dist plumbing
   train_sft.py / train_grpo.py / evaluate.py / cli.py
-tests/          93 tests, no GPU: reward branches, action grammar, exact token accounting,
+tests/          100 tests, no GPU: reward branches, action grammar, exact token accounting,
                 generator invariants, confound audit (incl. a planted bias), baselines, audit, leak filter
 scripts/        arc_env.sh · arc_infer.slurm · arc_sft.slurm · arc_grpo.slurm · train_all.sh · arc_setup_env.sh
 results/        baselines_mechanical.* · eval_{oracle,random,no-read}.* · audit_*.* · generation_report_v1.json · teacher_stats_v1.json
