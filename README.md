@@ -275,8 +275,8 @@ longctx generate --out data/v1 && longctx teacher --instances data/v1/train.json
 
 # LLM baselines FIRST (1 GPU)
 HF_HOME=/home/$USER/hf_cache CONDA_ENV=/home/$USER/miniconda3/envs/lcn JOB=baselines \
-sbatch --account=ece-6524-spring2026 --partition=h200_normal_q --qos=tc_h200_normal_short \
-       --gres=gpu:h200:1 --mem=96G --time=02:00:00 --mail-user=$USER@vt.edu scripts/arc_infer.slurm
+sbatch --account=ece-6524-spring2026 --partition=a100_normal_q --qos=tc_a100_normal_short \
+       --gres=gpu:a100:1 --mem=96G --time=02:00:00 --mail-user=$USER@vt.edu scripts/arc_infer.slurm
 JOB=eval ... scripts/arc_infer.slurm                       # base model through the environment
 
 # then the chain: sft -> grpo -> eval(sft) / eval(grpo) / scale(grpo)
