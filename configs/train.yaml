@@ -1,0 +1,45 @@
+# Training. Paths are relative to the repo root unless absolute.
+model: Qwen/Qwen2.5-7B-Instruct
+data_dir: data/v1
+checkpoint_dir: checkpoints/v1
+wandb_project: longctx-nav
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target: all-linear      # attn | all-linear
+
+generation:
+  max_new_tokens: 160     # THOUGHT + ACTION line; summaries are capped separately
+  temperature: 0.8
+  top_p: 0.95
+
+teacher:
+  # Cold start: privileged oracle trajectories, rejection-sampled and leak-filtered.
+  per_instance: 2
+  noise_prob: 0.15        # chance of a suboptimal-but-valid action per step
+  max_step_ratio: 1.5     # keep only trajectories with steps <= ratio * min_steps
+
+sft:
+  epochs: 2
+  learning_rate: 1.0e-5
+  per_device_batch_size: 2
+  grad_accum: 8
+  warmup_ratio: 0.03
+  max_seq_len: 4096
+
+grpo:
+  group_size: 8           # G rollouts per instance
+  instances_per_step: 4   # per rank
+  learning_rate: 1.0e-6
+  kl_beta: 0.04
+  clip_eps: 0.2
+  max_steps: 400
+  save_every: 50
+  train_max_hops: 3       # instances with n_hops > this are never trained on
+  curriculum:
+    enabled: false
+    start_hops: 2
+    escalate_at_success: 0.6
+    window: 20

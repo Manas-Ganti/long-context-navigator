@@ -1,0 +1,58 @@
+# Task generator. Every instance is produced from (these settings, seed) and
+# records the seed, so any instance can be regenerated exactly.
+
+# Chunk sizes in tokens (see env.yaml: tokenizer). Chunks are sized uniformly in
+# [chunk_min_tokens, chunk_max_tokens] regardless of whether they hold evidence,
+# so length cannot identify evidence.
+chunk_min_tokens: 320
+chunk_max_tokens: 480
+entries_per_chunk_min: 4
+entries_per_chunk_max: 7
+
+# Minimum token distance between any two required facts. Must be >= the
+# context ceiling so that no two required facts can sit inside one window.
+min_separation: 1200
+
+# Distractors.
+#   n_distractors    near-miss entities inserted next to each evidence entity
+#                    (alphabetically adjacent, so usually in the same chunk)
+#   superseded_prob  probability that an evidence entry carries a superseded
+#                    earlier statement ("previously X, until 2022")
+#   near_miss_values values of the answer's type in the answer chunk are drawn
+#                    within +/- this fraction of the true answer
+n_distractors: 1
+superseded_prob: 0.6
+near_miss_value_spread: 0.05
+
+# Fraction of chunks that are irrelevant filler sections (minutes, logs, ...).
+noise_ratio: 0.3
+
+# Validation. Population-level surface-feature AUCs must lie within
+# 0.5 +/- confound_tolerance for position, length and header; the generator
+# run fails otherwise. See validate_instance.py for what is checked per instance.
+confound_tolerance: 0.06
+max_regeneration_attempts: 50
+
+# Splits: name -> settings. n_hops and doc_tokens are lists sampled uniformly.
+# train/id_test share the hop range; ood_test is deeper than anything trained on.
+splits:
+  train:
+    n: 2000
+    seed_base: 100000
+    n_hops: [2, 3]
+    doc_tokens: [32000]
+  id_test:
+    n: 300
+    seed_base: 200000
+    n_hops: [2, 3]
+    doc_tokens: [32000]
+  ood_test:
+    n: 300
+    seed_base: 300000
+    n_hops: [4, 5]
+    doc_tokens: [32000]
+  scale_test:
+    n: 150
+    seed_base: 400000
+    n_hops: [3]
+    doc_tokens: [32000, 64000, 128000]

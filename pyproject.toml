@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longctx-nav"
+version = "0.1.0"
+description = "Long-context navigation RL environment: multi-hop QA under a hard context ceiling"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+# CUDA stack for the cluster. Lower-bounded, not pinned: resolve against the
+# cluster's torch/CUDA build (see scripts/arc_setup_env.sh).
+train = [
+    "torch>=2.4",
+    "transformers>=4.51",
+    "peft>=0.14",
+    "accelerate>=1.4",
+    "deepspeed>=0.16",
+    "vllm>=0.8",
+    "wandb>=0.18",
+]
+
+[project.scripts]
+longctx = "longctx.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

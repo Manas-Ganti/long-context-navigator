@@ -1,0 +1,11 @@
+# generated data is deterministic from the seeds: `longctx generate --out data/v1`
+data/*/*.jsonl
+data/*/logs/
+checkpoints/
+logs/
+wandb/
+results/*.trajectories.jsonl
+results/*/*.trajectories.jsonl
+__pycache__/
+*.egg-info/
+.pytest_cache/

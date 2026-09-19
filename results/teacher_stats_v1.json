@@ -1,0 +1,10 @@
+{
+ "sampled": 4000,
+ "rejected_incorrect": 0,
+ "rejected_too_long": 168,
+ "rejected_leak": 0,
+ "leak_examples": [],
+ "kept": 3832,
+ "keep_rate": 0.958,
+ "sft_rows": 20068
+}

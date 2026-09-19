@@ -1,0 +1,283 @@
+"""Stage 2 — GRPO against the environment's verifiable reward.
+
+Why not TRL's GRPOTrainer: the policy is stateless between steps, so one
+episode is SEVERAL independent (prompt, completion) pairs that share one
+return. GRPOTrainer's contract is one completion per prompt with the prompt
+fixed in the dataset; forcing a multi-step episode into that shape (prompt =
+first prompt, completion = all steps concatenated) would recompute logprobs
+under a context the policy never conditioned on. So this is a compact GRPO
+loop over per-step samples:
+
+    for each optimiser step:
+        sample B instances (rank-local); roll out G episodes per instance
+        (lockstep batched HF generate, per-step token ids recorded)
+        A_episode = (R - mean_group) / (std_group + eps); every step of the
+        episode inherits its episode's advantage
+        loss = -E[min(ratio * A, clip(ratio) * A)] + beta * KL(policy || reference)
+        reference = the same model with the LoRA adapter disabled
+
+Rollouts use HF generate (same process, same weights); DeepSpeed ZeRO-2 or
+plain DDP via `accelerate launch` / `torchrun`. Everything the policy is
+trained on has n_hops <= --train-max-hops; deeper instances are held out.
+
+    python -m longctx.train_grpo --instances data/v1/train.jsonl --adapter checkpoints/v1/sft-...
+    torchrun --nproc_per_node 8 -m longctx.train_grpo ... --deepspeed configs/deepspeed_zero2.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import time
+from collections import deque
+
+from . import common
+from .audit import probe_compression_noop
+from .config import load_env_config, load_train_config
+from .llm import HFBackend, LLMPolicy
+from .rollout import run_episodes
+from .schema import load_instances
+
+
+def group_advantages(rewards: list[float], eps: float = 1e-6) -> list[float]:
+    m = sum(rewards) / len(rewards)
+    var = sum((r - m) ** 2 for r in rewards) / len(rewards)
+    sd = var ** 0.5
+    if sd < eps:
+        return [0.0] * len(rewards)
+    return [(r - m) / (sd + eps) for r in rewards]
+
+
+def make_samples(trajs, instances_per_group: int, group_size: int) -> tuple[list[dict], dict]:
+    """Per-step samples with episode-level advantages. `trajs` is ordered as
+    [inst0 x G, inst1 x G, ...]."""
+    samples = []
+    usable_groups = 0
+    for g in range(instances_per_group):
+        group = trajs[g * group_size:(g + 1) * group_size]
+        adv = group_advantages([t.reward for t in group])
+        usable_groups += any(a != 0.0 for a in adv)
+        for t, a in zip(group, adv):
+            if a == 0.0:
+                continue
+            for s in t.steps:
+                if "completion_ids" in s and s["completion_ids"]:
+                    samples.append({"prompt_ids": s["prompt_ids"], "completion_ids": s["completion_ids"],
+                                    "advantage": a})
+    return samples, {"usable_groups": usable_groups / max(instances_per_group, 1)}
+
+
+def sequence_logprobs(model, batch, pad_id: int):
+    """Sum-free per-token logprobs of the completion positions. Returns
+    (logprobs [B, T-1], mask [B, T-1]) where mask selects completion tokens."""
+    import torch
+
+    input_ids, attn, comp_mask = batch["input_ids"], batch["attention_mask"], batch["completion_mask"]
+    out = model(input_ids=input_ids, attention_mask=attn, use_cache=False)
+    logits = out.logits[:, :-1].float()
+    targets = input_ids[:, 1:]
+    lp = torch.log_softmax(logits, dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    return lp, comp_mask[:, 1:].float()
+
+
+def collate(samples: list[dict], pad_id: int, device):
+    import torch
+
+    seqs = [s["prompt_ids"] + s["completion_ids"] for s in samples]
+    n = max(len(x) for x in seqs)
+    ids = torch.full((len(seqs), n), pad_id, dtype=torch.long)
+    attn = torch.zeros((len(seqs), n), dtype=torch.long)
+    cmask = torch.zeros((len(seqs), n), dtype=torch.long)
+    for i, (s, seq) in enumerate(zip(samples, seqs)):
+        ids[i, :len(seq)] = torch.tensor(seq)
+        attn[i, :len(seq)] = 1
+        cmask[i, len(s["prompt_ids"]):len(seq)] = 1
+    adv = torch.tensor([s["advantage"] for s in samples], dtype=torch.float)
+    return {"input_ids": ids.to(device), "attention_mask": attn.to(device), "completion_mask": cmask.to(device),
+            "advantage": adv.to(device)}
+
+
+def grpo_loss(model, batch, *, clip_eps: float, kl_beta: float):
+    """One micro-batch. ratio is 1 on the first (and only) pass over a rollout
+    batch, so the clipped surrogate reduces to policy gradient; the clip is
+    kept so --inner-epochs > 1 stays correct."""
+    import torch
+
+    lp, mask = sequence_logprobs(model, batch, None)
+    with torch.no_grad():
+        with model.disable_adapter():
+            ref_lp, _ = sequence_logprobs(model, batch, None)
+    old_lp = lp.detach()
+    ratio = torch.exp(lp - old_lp)
+    adv = batch["advantage"].unsqueeze(1)
+    surr = torch.min(ratio * adv, torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv)
+    kl = torch.exp(ref_lp - lp) - (ref_lp - lp) - 1
+    per_tok = -surr + kl_beta * kl
+    seq_loss = (per_tok * mask).sum(1) / mask.sum(1).clamp(min=1)
+    kl_mean = ((kl * mask).sum() / mask.sum().clamp(min=1)).item()
+    return seq_loss.mean(), kl_mean
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--env-config", default=None)
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--adapter", default=None, help="SFT LoRA adapter to continue training (recommended)")
+    ap.add_argument("--instances", default=None, help="training instances jsonl")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--max-steps", type=int, default=None)
+    ap.add_argument("--group-size", type=int, default=None)
+    ap.add_argument("--instances-per-step", type=int, default=None)
+    ap.add_argument("--learning-rate", type=float, default=None)
+    ap.add_argument("--kl-beta", type=float, default=None)
+    ap.add_argument("--clip-eps", type=float, default=None)
+    ap.add_argument("--train-max-hops", type=int, default=None)
+    ap.add_argument("--curriculum", action="store_true")
+    ap.add_argument("--micro-batch", type=int, default=2, help="sequences per forward pass")
+    ap.add_argument("--rollout-batch", type=int, default=32, help="episodes advanced per generate call")
+    ap.add_argument("--save-every", type=int, default=None)
+    ap.add_argument("--resume", default=None, help="adapter dir to resume from (+ state.json)")
+    ap.add_argument("--deepspeed", default=None, help="informational; pass the plugin via accelerate config")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true", help="wire everything with the mechanical oracle, no model")
+    args = ap.parse_args(argv)
+
+    cfg = load_train_config(args.config)
+    env_cfg = load_env_config(args.env_config)
+    g = cfg.grpo
+    model_name = args.model or cfg.model
+    instances_path = args.instances or f"{cfg.data_dir}/train.jsonl"
+    out = args.out or f"{cfg.checkpoint_dir}/grpo-{common.model_tag(model_name)}"
+    max_steps = args.max_steps or g.max_steps
+    G = args.group_size or g.group_size
+    B = args.instances_per_step or g.instances_per_step
+    lr = args.learning_rate or g.learning_rate
+    kl_beta = g.kl_beta if args.kl_beta is None else args.kl_beta
+    clip_eps = args.clip_eps or g.clip_eps
+    train_max_hops = args.train_max_hops or g.train_max_hops
+    save_every = args.save_every or g.save_every
+    curriculum = g.curriculum.model_copy(update={"enabled": args.curriculum or g.curriculum.enabled})
+
+    dist = common.dist_info()
+    rng = random.Random(args.seed + dist.rank)
+    all_insts = [i for i in load_instances(common.resolve_path(instances_path)) if i.n_hops <= train_max_hops]
+    common.rank0_print(f"train instances: {len(all_insts)} (n_hops <= {train_max_hops}) from {instances_path}")
+    common.record_run("grpo", f"model={model_name} adapter={args.adapter} out={out} G={G} B={B}",
+                      os.path.join(cfg.data_dir, "logs"))
+
+    if args.dry_run:
+        from .policies import OracleNavigator
+
+        picks = rng.sample(all_insts, B)
+        trajs = run_episodes(env_cfg, OracleNavigator(noise_prob=0.5, seed=1), [i for i in picks for _ in range(G)])
+        samples, info = make_samples(trajs, B, G)
+        print(f"dry run: {len(trajs)} episodes, usable_groups={info['usable_groups']:.2f}, "
+              f"reward mean={sum(t.reward for t in trajs) / len(trajs):.3f} (token samples need a model: {len(samples)})")
+        return
+
+    import torch
+    from accelerate import Accelerator
+
+    accelerator = Accelerator()
+    device = accelerator.device
+    tok = common.load_tokenizer(model_name)
+    model = common.load_policy(model_name, adapter=args.resume or args.adapter, trainable=True, device=str(device),
+                               gradient_checkpointing=True)
+    if not (args.adapter or args.resume):
+        from peft import get_peft_model
+
+        model = get_peft_model(model, common.lora_config(cfg.lora.r, cfg.lora.alpha, cfg.lora.dropout, cfg.lora.target))
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
+    model, optimizer = accelerator.prepare(model, optimizer)
+    unwrapped = accelerator.unwrap_model(model)
+
+    start_step = 0
+    if args.resume and os.path.exists(os.path.join(args.resume, "state.json")):
+        start_step = json.load(open(os.path.join(args.resume, "state.json")))["step"]
+        common.rank0_print(f"resuming at step {start_step}")
+
+    wandb_run = common.wandb_init(cfg.wandb_project, "grpo", {
+        "model": model_name, "adapter": args.adapter, "G": G, "B": B, "lr": lr, "kl_beta": kl_beta,
+        "clip_eps": clip_eps, "train_max_hops": train_max_hops, "curriculum": curriculum.model_dump(),
+        "world_size": dist.world_size, "ceiling": env_cfg.context_ceiling})
+
+    backend = HFBackend(unwrapped, tok)
+    policy = LLMPolicy(backend, max_new_tokens=cfg.generation.max_new_tokens,
+                       temperature=cfg.generation.temperature, top_p=cfg.generation.top_p, name="grpo-policy")
+    cur_hops = curriculum.start_hops if curriculum.enabled else train_max_hops
+    success_window: deque = deque(maxlen=curriculum.window)
+    t0 = time.time()
+
+    for step in range(start_step, max_steps):
+        pool = [i for i in all_insts if i.n_hops <= cur_hops]
+        picks = rng.sample(pool, min(B, len(pool)))
+        episodes = [i for i in picks for _ in range(G)]
+
+        # ---- rollouts (no grad, eval mode, cache on) ------------------- #
+        unwrapped.eval()
+        unwrapped.config.use_cache = True
+        with torch.no_grad():
+            trajs = run_episodes(env_cfg, policy, episodes, batch_size=args.rollout_batch)
+        unwrapped.config.use_cache = False
+        unwrapped.train()
+
+        samples, ginfo = make_samples(trajs, len(picks), G)
+        rng.shuffle(samples)
+
+        # ---- update ---------------------------------------------------- #
+        optimizer.zero_grad(set_to_none=True)
+        n_micro = max((len(samples) + args.micro_batch - 1) // args.micro_batch, 1)
+        kls, losses = [], []
+        for m in range(0, len(samples), args.micro_batch):
+            batch = collate(samples[m:m + args.micro_batch], tok.pad_token_id, device)
+            loss, kl = grpo_loss(unwrapped, batch, clip_eps=clip_eps, kl_beta=kl_beta)
+            accelerator.backward(loss / n_micro)
+            losses.append(loss.item())
+            kls.append(kl)
+        if samples:
+            accelerator.clip_grad_norm_(params, 1.0)
+        optimizer.step()
+
+        # ---- metrics (rank-local; W&B from rank 0) --------------------- #
+        n = len(trajs)
+        acc = sum(t.correct for t in trajs) / n
+        success_window.append(acc)
+        comp = probe_compression_noop([t.to_dict() for t in trajs], {i.id: i for i in picks})
+        metrics = {
+            "rollout/reward": sum(t.reward for t in trajs) / n, "rollout/accuracy": acc,
+            "rollout/ceiling_violation": sum(t.ceiling_exceeded for t in trajs) / n,
+            "rollout/budget_exhausted": sum(t.budget_exhausted for t in trajs) / n,
+            "rollout/steps_over_min": sum(t.steps_used / t.min_steps for t in trajs) / n,
+            "rollout/invalid_actions": sum(t.n_invalid for t in trajs) / max(sum(t.steps_used for t in trajs), 1),
+            "rollout/compress_usage": comp["episodes_using_compress_rate"],
+            "rollout/fact_retention": comp["fact_retention_rate"] or 0.0,
+            "train/usable_groups": ginfo["usable_groups"], "train/samples": len(samples),
+            "train/loss": sum(losses) / max(len(losses), 1), "train/kl": sum(kls) / max(len(kls), 1),
+            "train/cur_hops": cur_hops, "time/elapsed_min": (time.time() - t0) / 60,
+        }
+        common.rank0_print(f"[step {step:>4}] " + " ".join(f"{k.split('/')[-1]}={v:.3f}" for k, v in metrics.items()))
+        common.wandb_log(wandb_run, metrics, step=step)
+
+        if curriculum.enabled and cur_hops < train_max_hops and len(success_window) == curriculum.window \
+                and sum(success_window) / len(success_window) >= curriculum.escalate_at_success:
+            cur_hops += 1
+            success_window.clear()
+            common.rank0_print(f"curriculum: escalating to n_hops <= {cur_hops}")
+
+        if (step + 1) % save_every == 0 or step + 1 == max_steps:
+            accelerator.wait_for_everyone()
+            if dist.is_main:
+                unwrapped.save_pretrained(out)
+                tok.save_pretrained(out)
+                with open(os.path.join(out, "state.json"), "w") as f:
+                    json.dump({"step": step + 1, "cur_hops": cur_hops}, f)
+                common.rank0_print(f"saved adapter to {out} at step {step + 1}")
+    common.rank0_print("done")
+
+
+if __name__ == "__main__":
+    main()

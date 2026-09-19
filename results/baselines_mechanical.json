@@ -1,0 +1,58 @@
+{
+ "mechanical": {
+  "n": 600,
+  "by_hops": {
+   "2": {
+    "no_read_fixed_guess": 0.0,
+    "no_read_chance": 0.016890003806628157,
+    "single_chunk_oracle_expected": 0.192989417989418,
+    "single_chunk_oracle_sampled": 0.19047619047619047,
+    "single_chunk_top_overlap_contains_answer": 0.0,
+    "full_document_oracle": 1.0,
+    "n": 126
+   },
+   "3": {
+    "no_read_fixed_guess": 0.0,
+    "no_read_chance": 0.01688812925714344,
+    "single_chunk_oracle_expected": 0.18445539135194308,
+    "single_chunk_oracle_sampled": 0.13793103448275862,
+    "single_chunk_top_overlap_contains_answer": 0.0,
+    "full_document_oracle": 1.0,
+    "n": 174
+   },
+   "4": {
+    "no_read_fixed_guess": 0.0,
+    "no_read_chance": 0.016898423373465327,
+    "single_chunk_oracle_expected": 0.1792303084755915,
+    "single_chunk_oracle_sampled": 0.2389937106918239,
+    "single_chunk_top_overlap_contains_answer": 0.0,
+    "full_document_oracle": 1.0,
+    "n": 159
+   },
+   "5": {
+    "no_read_fixed_guess": 0.0,
+    "no_read_chance": 0.01688780224881086,
+    "single_chunk_oracle_expected": 0.17602161431948665,
+    "single_chunk_oracle_sampled": 0.2127659574468085,
+    "single_chunk_top_overlap_contains_answer": 0.0,
+    "full_document_oracle": 1.0,
+    "n": 141
+   }
+  },
+  "overall": {
+   "full_document_oracle": 1.0,
+   "single_chunk_oracle_expected": 0.18288095238095237,
+   "single_chunk_top_overlap_contains_answer": 0.0,
+   "no_read_fixed_guess": 0.0,
+   "no_read_chance": 0.016891174006402377,
+   "single_chunk_oracle_sampled": 0.19333333333333333
+  }
+ },
+ "llm": null,
+ "n": 600,
+ "instances": [
+  "data/v1/id_test.jsonl",
+  "data/v1/ood_test.jsonl"
+ ],
+ "model": null
+}

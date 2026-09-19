@@ -1,0 +1,78 @@
+{
+ "n_trajectories": 600,
+ "accuracy": 0.0,
+ "ceiling_violation_rate": 0.0,
+ "budget_exhausted_rate": 0.0,
+ "guess_without_reading": {
+  "episodes_with_zero_reads": 600,
+  "zero_read_rate": 1.0,
+  "accuracy_given_zero_reads": 0.0,
+  "answered_given_zero_reads": 1.0
+ },
+ "position_bias": {
+  "by_answer_position": {
+   "bucket_0": {
+    "n": 106,
+    "accuracy": 0.0
+   },
+   "bucket_1": {
+    "n": 130,
+    "accuracy": 0.0
+   },
+   "bucket_2": {
+    "n": 116,
+    "accuracy": 0.0
+   },
+   "bucket_3": {
+    "n": 127,
+    "accuracy": 0.0
+   },
+   "bucket_4": {
+    "n": 121,
+    "accuracy": 0.0
+   }
+  },
+  "by_first_hop_position": {
+   "bucket_0": {
+    "n": 120,
+    "accuracy": 0.0
+   },
+   "bucket_1": {
+    "n": 131,
+    "accuracy": 0.0
+   },
+   "bucket_2": {
+    "n": 117,
+    "accuracy": 0.0
+   },
+   "bucket_3": {
+    "n": 126,
+    "accuracy": 0.0
+   },
+   "bucket_4": {
+    "n": 106,
+    "accuracy": 0.0
+   }
+  },
+  "answer_position_accuracy_spread": 0.0
+ },
+ "compression_noop": {
+  "compress_actions": 0,
+  "episodes_using_compress_rate": 0.0,
+  "evidence_facts_compressed": 0,
+  "fact_retention_rate": null,
+  "degenerate_summary_rate": null,
+  "mean_summary_tokens": null,
+  "episodes_lost_fact_and_wrong": 0
+ },
+ "drop_reread_loops": {
+  "episodes_with_reread_rate": 0.0,
+  "mean_rereads_per_episode": 0.0,
+  "mean_reads_over_min_reads": 0.0
+ },
+ "distractor_capture": {
+  "wrong_answers": 600,
+  "distractor_capture_rate": 0.0,
+  "by_kind": {}
+ }
+}
