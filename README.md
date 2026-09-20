@@ -14,8 +14,9 @@ audit exist so that the answer is trustworthy in either direction.
 **Status.** Generator, validator, environment, reward, baselines, audit, teacher, SFT and GRPO
 trainers, evaluation and the ARC launchers are built and tested (`pytest`: 100 tests, no GPU).
 Everything model-free has been run and is reported, and so have the **LLM baselines and the
-untrained base model through the environment** (Qwen2.5-7B-Instruct, one A100). **SFT and GRPO
-have not been run yet** — those rows and the OOD curve are pending. Nothing in this file is a
+untrained base model through the environment** (Qwen2.5-7B-Instruct, one A100). **SFT has been run
+and evaluated** (in-distribution 0.630, OOD 0.050 — see [Results so far](#results-so-far)); GRPO
+is pending. Nothing in this file is a
 placeholder; every number came from a command listed next to it.
 
 ---
@@ -271,7 +272,42 @@ plain `transformers.Trainer` + LoRA with the loss on the assistant tokens, no mu
 * `vLLM` serves evaluation and the LLM baselines (LoRA adapters loaded through vLLM's LoRA
   support); GRPO rollouts use HF generate in-process so the update sees the same weights.
 
-## Evaluation (pending)
+## Results so far
+
+### After SFT (`JOB=eval ADAPTER=checkpoints/v1/sft-… TAG=sft`, 600 held-out instances)
+
+SFT: LoRA r=32 on the 20 068 teacher rows, 2 epochs, effective batch 64, 4×A100, 2.8 h; loss
+2.22 → 0.016.
+
+| policy | ID (2–3 hops) | OOD (4–5 hops) | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| untrained base, in environment | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| **SFT** | **0.630** | **0.050** | 0.730 | 0.557 | 0.082 | 0.014 |
+| single-chunk baseline (mechanical) | 0.187 | 0.178 | 0.193 | 0.184 | 0.179 | 0.176 |
+| full-document, reasoning (no ceiling) | 0.936 | 0.653 | 0.944 | 0.931 | 0.761 | 0.532 |
+
+| SFT policy | ID | OOD |
+|---|---|---|
+| ceiling violations | 0.000 | 0.017 |
+| steps / instance minimum | 1.88 | 2.39 |
+| COMPRESS used (episodes) | 0.98 | 1.00 |
+| fact retention in summaries | 0.982 | 0.599 |
+
+Audit (all 600): zero-read episodes 0; accuracy spread across answer-position quintiles 0.047;
+3654 `COMPRESS` actions, 0.2% degenerate, 9.5 tokens each; **59% of episodes re-read a chunk
+they had already compressed**, reads / min reads 2.12; 52% of episodes exhausted the step
+budget; of 78 wrong answers 15% are a known distractor (5 near-miss value, 4 near-miss entity,
+3 superseded link).
+
+Reading: SFT learned the hard constraint outright (ceiling violations 0 in distribution) and
+the compression routine — but as a routine for the lengths it was shown. At 4–5 hops the
+summaries stop carrying every bridge (retention 0.98 → 0.60), the policy goes back to re-read
+what it lost, and runs out of steps. Against the ceiling: the same model with every evidence
+chunk in view reaches 0.93 at 3 hops; navigating under 600 tokens it reaches 0.56. The
+composition-generalisation question is now whether GRPO — trained only on ≤3 hops — closes
+either gap.
+
+## Evaluation
 
 `longctx evaluate` reports, on held-out generated instances: accuracy by `n_hops`; in-distribution
 (2–3) vs OOD (4–5); accuracy by document size (`scale_test`: 32k / 64k / 128k); steps used /
