@@ -152,29 +152,30 @@ class NavigationEnv:
             if missing:
                 rec.error = f"not held: {', '.join(missing)}"
                 return
+            ids = list(dict.fromkeys(a.ids))   # defensive: never pop the same id twice
             if a.kind == DROP:
-                for i in a.ids:
+                for i in ids:
                     item = self.held.pop(i)
                     if item.kind == "chunk":
                         self.dropped.append(int(i))
                 return
             summary = self.tok.truncate(a.text, self.cfg.max_summary_tokens)
             s_tokens = self.tok.count(summary)
-            freed = sum(self.held[i].tokens for i in a.ids)
+            freed = sum(self.held[i].tokens for i in ids)
             if self.used_tokens - freed + s_tokens > ceiling:
                 self.ceiling_exceeded = True
                 self.done = True
                 rec.error = (f"ceiling exceeded: {self.used_tokens} - {freed} + {s_tokens} > {ceiling}")
                 return
-            for i in a.ids:
+            for i in ids:
                 item = self.held.pop(i)
                 if item.kind == "chunk":
                     self.dropped.append(int(i))
             self.n_summaries += 1
             sid = f"S{self.n_summaries}"
-            self.held[sid] = HeldItem(id=sid, kind="summary", tokens=s_tokens, text=summary, sources=list(a.ids))
-            self.compressed.append(f"{sid}<-[{', '.join(a.ids)}]")
-            rec.summary, rec.summary_sources = summary, list(a.ids)
+            self.held[sid] = HeldItem(id=sid, kind="summary", tokens=s_tokens, text=summary, sources=ids)
+            self.compressed.append(f"{sid}<-[{', '.join(ids)}]")
+            rec.summary, rec.summary_sources = summary, list(ids)
             return
 
         # ANSWER

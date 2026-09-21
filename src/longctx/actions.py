@@ -65,7 +65,7 @@ def _parse_ids(s: str) -> list[str]:
         out.append(tok.upper() if tok[0] in "sS" else str(int(tok)))
     if not out:
         raise ParseError(f"no ids in {s.strip()[:40]!r}")
-    return out
+    return list(dict.fromkeys(out))       # dedupe, keep order: 'DROP 75, 75' crashed the env once
 
 
 def parse_action(text: str) -> Action:

@@ -158,3 +158,16 @@ def test_map_covers_every_chunk(env_cfg, inst3):
     for c in inst3.chunks:
         if c.kind == "register":
             assert f"[{c.idx}] {c.header}" in text
+
+
+def test_duplicate_ids_do_not_crash(env_cfg, inst3):
+    """'DROP 75, 75' raised KeyError inside a GRPO rollout and killed the rank."""
+    env = make_env(env_cfg)
+    env.reset(inst3)
+    idx = inst3.evidence[0].chunk_idx
+    env.step(f"READ {idx}")
+    obs, _, done, _ = env.step(f"ACTION: COMPRESS {idx}, {idx} :: fact")
+    assert not done and [h.id for h in obs.held] == ["S1"] and obs.held[0].sources == [str(idx)]
+    env.step("READ 0")
+    obs, _, done, _ = env.step("DROP 0 0 S1 S1")
+    assert not done and obs.held == [] and obs.used == 0
