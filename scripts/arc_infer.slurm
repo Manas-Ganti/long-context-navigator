@@ -6,7 +6,9 @@
 #   JOB=baselines REASONING=1 sbatch ... scripts/arc_infer.slurm        # same, model may reason first
 #   JOB=eval      sbatch ... scripts/arc_infer.slurm                    # base model through the env
 #   JOB=eval ADAPTER=checkpoints/v1/sft-qwen2.5-7b-instruct sbatch ...  # SFT policy
-#   JOB=eval ADAPTER=checkpoints/v1/grpo-qwen2.5-7b-instruct TAG=grpo sbatch ...
+#   # GRPO adapters sit on the MERGED SFT model, so pass that as MODEL:
+#   JOB=eval MODEL=checkpoints/v1/sft-merged-qwen2.5-7b-instruct \
+#       ADAPTER=checkpoints/v1/grpo-qwen2.5-7b-instruct TAG=grpo sbatch ...
 #
 # Always pass on the submit line (see arc_quickref.md): --account, --partition,
 # --qos=*_short, --gres=gpu:<type>:1, an explicit --mem, --time, --mail-user.

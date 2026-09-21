@@ -45,8 +45,9 @@ echo "sft   $S -> checkpoints/$LCN_DATA/sft-$TAG"
 G=$(SFT_CKPT="checkpoints/$LCN_DATA/sft-$TAG" submit "gpu:$GPU:$NGPU" "${T_GRPO:-23:00:00}" scripts/arc_grpo.slurm --mem=192G --dependency=afterok:$S)
 echo "grpo  $G -> checkpoints/$LCN_DATA/grpo-$TAG"
 E1=$(JOB=eval ADAPTER="checkpoints/$LCN_DATA/sft-$TAG" TAG=sft submit "gpu:$GPU:1" "${T_EVAL:-03:00:00}" scripts/arc_infer.slurm --mem=96G --dependency=afterok:$S)
-E2=$(JOB=eval ADAPTER="checkpoints/$LCN_DATA/grpo-$TAG" TAG=grpo submit "gpu:$GPU:1" "${T_EVAL:-03:00:00}" scripts/arc_infer.slurm --mem=96G --dependency=afterok:$G)
-E3=$(JOB=scale ADAPTER="checkpoints/$LCN_DATA/grpo-$TAG" TAG=grpo submit "gpu:$GPU:1" "${T_EVAL:-03:00:00}" scripts/arc_infer.slurm --mem=96G --dependency=afterok:$G)
+MERGED="checkpoints/$LCN_DATA/sft-merged-$TAG"
+E2=$(JOB=eval MODEL="$MERGED" ADAPTER="checkpoints/$LCN_DATA/grpo-$TAG" TAG=grpo submit "gpu:$GPU:1" "${T_EVAL:-03:00:00}" scripts/arc_infer.slurm --mem=96G --dependency=afterok:$G)
+E3=$(JOB=scale MODEL="$MERGED" ADAPTER="checkpoints/$LCN_DATA/grpo-$TAG" TAG=grpo submit "gpu:$GPU:1" "${T_EVAL:-03:00:00}" scripts/arc_infer.slurm --mem=96G --dependency=afterok:$G)
 echo "eval  sft=$E1 grpo=$E2 scale=$E3"
 echo "cancel all: scancel $S $G $E1 $E2 $E3"
 squeue -u "$USER" -o "%.10i %.12j %.2t %.10M %.10L %.6D %R"

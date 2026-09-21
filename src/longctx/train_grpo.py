@@ -16,6 +16,13 @@ loop over per-step samples:
         loss = -E[min(ratio * A, clip(ratio) * A)] + beta * KL(policy || reference)
         reference = the same model with the LoRA adapter disabled
 
+The reference must be the SFT policy, not the base model. So the SFT adapter
+is MERGED into the weights first and a fresh LoRA is trained on top: with the
+adapter disabled the model is exactly the SFT policy and KL starts at ~0. The
+first calibration run trained the SFT adapter directly, and KL(policy || base)
+read 2.0 nats/token at step 0 — a constant pull toward forgetting SFT. The
+merged model is saved once (rank 0) so vLLM can evaluate GRPO adapters on it.
+
 Rollouts use HF generate (same process, same weights); DeepSpeed ZeRO-2 or
 plain DDP via `accelerate launch` / `torchrun`. Everything the policy is
 trained on has n_hops <= --train-max-hops; deeper instances are held out.
@@ -120,12 +127,40 @@ def grpo_loss(model, batch, *, clip_eps: float, kl_beta: float):
     return seq_loss.mean(), kl_mean
 
 
+def merge_sft_adapter(model_name: str, adapter: str, merged_dir, accelerator, tok) -> str:
+    """Merge the SFT LoRA into the base weights and save once (rank 0); every
+    rank then loads the merged model as its base. Idempotent: an existing
+    merged_dir with a config.json is reused."""
+    import torch
+
+    marker = os.path.join(merged_dir, "config.json")
+    if accelerator.is_main_process and not os.path.exists(marker):
+        common.rank0_print(f"merging {adapter} into {model_name} -> {merged_dir}")
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM
+
+        base = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
+        merged = PeftModel.from_pretrained(base, adapter).merge_and_unload()
+        os.makedirs(merged_dir, exist_ok=True)
+        merged.save_pretrained(merged_dir, safe_serialization=True)
+        tok.save_pretrained(merged_dir)
+        with open(os.path.join(merged_dir, "merged_from.json"), "w") as f:
+            json.dump({"base": model_name, "adapter": adapter}, f)
+        del merged, base
+    accelerator.wait_for_everyone()
+    if not os.path.exists(marker):
+        raise RuntimeError(f"merged model not found at {merged_dir}")
+    return str(merged_dir)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
     ap.add_argument("--env-config", default=None)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--adapter", default=None, help="SFT LoRA adapter to continue training (recommended)")
+    ap.add_argument("--adapter", default=None, help="SFT LoRA adapter; merged into the weights, then a fresh LoRA is trained")
+    ap.add_argument("--merged-dir", default=None, help="where the merged SFT model is saved/loaded (default <checkpoint_dir>/sft-merged-<tag>)")
+    ap.add_argument("--no-merge", action="store_true", help="old behaviour: keep training the SFT adapter (reference = base model)")
     ap.add_argument("--instances", default=None, help="training instances jsonl")
     ap.add_argument("--out", default=None)
     ap.add_argument("--max-steps", type=int, default=None)
@@ -184,12 +219,22 @@ def main(argv=None):
     accelerator = Accelerator()
     device = accelerator.device
     tok = common.load_tokenizer(model_name)
-    model = common.load_policy(model_name, adapter=args.resume or args.adapter, trainable=True, device=str(device),
-                               gradient_checkpointing=True)
-    if not (args.adapter or args.resume):
-        from peft import get_peft_model
+    from peft import get_peft_model
 
-        model = get_peft_model(model, common.lora_config(cfg.lora.r, cfg.lora.alpha, cfg.lora.dropout, cfg.lora.target))
+    merged_dir = common.resolve_path(args.merged_dir or f"{cfg.checkpoint_dir}/sft-merged-{common.model_tag(model_name)}")
+    if args.adapter and not args.no_merge:
+        base_name = merge_sft_adapter(model_name, args.adapter, merged_dir, accelerator, tok)
+        model = common.load_policy(base_name, adapter=args.resume, trainable=True, device=str(device),
+                                   gradient_checkpointing=True)
+        if not args.resume:
+            model = get_peft_model(model, common.lora_config(cfg.lora.r, cfg.lora.alpha, cfg.lora.dropout, cfg.lora.target))
+    else:
+        model = common.load_policy(model_name, adapter=args.resume or args.adapter, trainable=True, device=str(device),
+                                   gradient_checkpointing=True)
+        if not (args.adapter or args.resume):
+            model = get_peft_model(model, common.lora_config(cfg.lora.r, cfg.lora.alpha, cfg.lora.dropout, cfg.lora.target))
+    if dist.is_main:
+        model.print_trainable_parameters()
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
     model, optimizer = accelerator.prepare(model, optimizer)

@@ -39,8 +39,12 @@ if [ -n "${DS:-}" ]; then
   export ACCELERATE_DEEPSPEED_CONFIG_FILE="$DS"
 fi
 
+# The SFT adapter is merged into the weights (once, to MERGED_DIR) and a fresh
+# LoRA is trained on top, so the KL reference is the SFT policy, not the base.
+MERGED_DIR="${MERGED_DIR:-checkpoints/${LCN_DATA}/sft-merged-${TAG}}"
+
 arc_torchrun -m longctx.train_grpo \
-  --model "$MODEL" --adapter "$SFT_CKPT" --out "$OUT" \
+  --model "$MODEL" --adapter "$SFT_CKPT" --merged-dir "$MERGED_DIR" --out "$OUT" \
   --instances "data/${LCN_DATA}/train.jsonl" \
   ${G:+--group-size "$G"} ${B:+--instances-per-step "$B"} ${LR:+--learning-rate "$LR"} \
   ${KL_BETA:+--kl-beta "$KL_BETA"} ${CURRICULUM:+--curriculum} ${RESUME:+--resume "$RESUME"} \
