@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Stage 2 — GRPO. One node, one process per GPU; each rank rolls out its own
-# instances (HF generate, same weights as the update) and gradients are
-# averaged data-parallel. Plain DDP by default; set DS=configs/deepspeed_zero2.json
-# to shard optimizer state through accelerate's DeepSpeed plugin.
+# instances (HF generate, same weights as the update) and the LoRA gradients
+# are averaged across ranks every step (a manual all-reduce, not DDP — see
+# train_grpo.py). No DeepSpeed: a 7B + LoRA fits an 80 GB card.
 #
 #   SFT_CKPT=checkpoints/v1/sft-qwen2.5-7b-instruct sbatch --gres=gpu:h200:4 ... scripts/arc_grpo.slurm
 #   ... scripts/arc_grpo.slurm --max-steps 5          # calibrate wall-clock first
@@ -34,10 +34,6 @@ MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 TAG="$(echo "$MODEL" | tr '[:upper:]' '[:lower:]' | sed 's|.*/||')"
 SFT_CKPT="${SFT_CKPT:-checkpoints/${LCN_DATA}/sft-${TAG}}"
 OUT="${OUT:-checkpoints/${LCN_DATA}/grpo-${TAG}}"
-if [ -n "${DS:-}" ]; then
-  export ACCELERATE_USE_DEEPSPEED=true
-  export ACCELERATE_DEEPSPEED_CONFIG_FILE="$DS"
-fi
 
 # The SFT adapter is merged into the weights (once, to MERGED_DIR) and a fresh
 # LoRA is trained on top, so the KL reference is the SFT policy, not the base.

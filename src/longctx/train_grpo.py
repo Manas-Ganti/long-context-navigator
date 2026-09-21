@@ -23,9 +23,19 @@ first calibration run trained the SFT adapter directly, and KL(policy || base)
 read 2.0 nats/token at step 0 — a constant pull toward forgetting SFT. The
 merged model is saved once (rank 0) so vLLM can evaluate GRPO adapters on it.
 
-Rollouts use HF generate (same process, same weights); DeepSpeed ZeRO-2 or
-plain DDP via `accelerate launch` / `torchrun`. Everything the policy is
-trained on has n_hops <= --train-max-hops; deeper instances are held out.
+Parallelism: one process per GPU (torchrun). Each rank rolls out its own
+instances (HF generate, same weights), computes the loss on its own per-step
+samples, and the LoRA gradients are averaged across ranks by hand before the
+optimiser step. Not DDP: DDP all-reduces inside every backward and needs
+equal micro-batch counts on every rank, and ours differ each step (the
+number of steps an episode takes is the policy's choice). A first version
+ran the forward outside the DDP wrapper, so no all-reduce ever fired — four
+ranks trained four independent adapters and only rank 0's was saved — and the
+only collective was a barrier every 10 steps, which the ranks reached tens of
+minutes apart until the NCCL watchdog aborted one of them. The manual
+all-reduce is a per-step sync, so drift is bounded by one step.
+Everything the policy is trained on has n_hops <= --train-max-hops; deeper
+instances are held out.
 
     python -m longctx.train_grpo --instances data/v1/train.jsonl --adapter checkpoints/v1/sft-...
     torchrun --nproc_per_node 8 -m longctx.train_grpo ... --deepspeed configs/deepspeed_zero2.json
@@ -106,6 +116,38 @@ def collate(samples: list[dict], pad_id: int, device):
             "advantage": adv.to(device)}
 
 
+def sync_grads(params) -> None:
+    """Average gradients across ranks as one flat all-reduce. A param with no
+    grad on this rank (no samples) contributes zeros."""
+    import torch
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return
+    grads = [p.grad if p.grad is not None else torch.zeros_like(p) for p in params]
+    flat = torch.cat([g.reshape(-1) for g in grads])
+    dist.all_reduce(flat, op=dist.ReduceOp.AVG)
+    off = 0
+    for p, g in zip(params, grads):
+        n = g.numel()
+        p.grad = flat[off:off + n].view_as(p)
+        off += n
+
+
+def all_reduce_sums(values: dict, device) -> dict:
+    """Sum a dict of floats across ranks (metrics are logged for the whole
+    data-parallel batch, not one rank's slice)."""
+    import torch
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return dict(values)
+    keys = sorted(values)
+    t = torch.tensor([float(values[k]) for k in keys], dtype=torch.float64, device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return dict(zip(keys, t.tolist()))
+
+
 def grpo_loss(model, batch, *, clip_eps: float, kl_beta: float):
     """One micro-batch. ratio is 1 on the first (and only) pass over a rollout
     batch, so the clipped surrogate reduces to policy gradient; the clip is
@@ -175,7 +217,6 @@ def main(argv=None):
     ap.add_argument("--rollout-batch", type=int, default=32, help="episodes advanced per generate call")
     ap.add_argument("--save-every", type=int, default=None)
     ap.add_argument("--resume", default=None, help="adapter dir to resume from (+ state.json)")
-    ap.add_argument("--deepspeed", default=None, help="informational; pass the plugin via accelerate config")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true", help="wire everything with the mechanical oracle, no model")
     args = ap.parse_args(argv)
@@ -213,13 +254,20 @@ def main(argv=None):
               f"reward mean={sum(t.reward for t in trajs) / len(trajs):.3f} (token samples need a model: {len(samples)})")
         return
 
+    from datetime import timedelta
+
     import torch
     from accelerate import Accelerator
+    from accelerate.utils import InitProcessGroupKwargs
 
-    accelerator = Accelerator()
+    # Only used for process-group init and the device; the model is NOT wrapped
+    # (see the module docstring). Generous timeout: a step can take 10 minutes.
+    accelerator = Accelerator(kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(hours=2))])
     device = accelerator.device
     tok = common.load_tokenizer(model_name)
     from peft import get_peft_model
+
+    torch.manual_seed(args.seed)      # identical LoRA init on every rank — averaged grads need one start point
 
     merged_dir = common.resolve_path(args.merged_dir or f"{cfg.checkpoint_dir}/sft-merged-{common.model_tag(model_name)}")
     if args.adapter and not args.no_merge:
@@ -237,8 +285,8 @@ def main(argv=None):
         model.print_trainable_parameters()
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
-    model, optimizer = accelerator.prepare(model, optimizer)
-    unwrapped = accelerator.unwrap_model(model)
+    unwrapped = model
+    torch.manual_seed(args.seed + dist.rank)   # rank-distinct sampling from here on
 
     start_step = 0
     if args.resume and os.path.exists(os.path.join(args.resume, "state.json")):
@@ -273,35 +321,45 @@ def main(argv=None):
         samples, ginfo = make_samples(trajs, len(picks), G)
         rng.shuffle(samples)
 
-        # ---- update ---------------------------------------------------- #
+        # ---- update: local gradient, then averaged across ranks --------- #
         optimizer.zero_grad(set_to_none=True)
         n_micro = max((len(samples) + args.micro_batch - 1) // args.micro_batch, 1)
         kls, losses = [], []
         for m in range(0, len(samples), args.micro_batch):
             batch = collate(samples[m:m + args.micro_batch], tok.pad_token_id, device)
             loss, kl = grpo_loss(unwrapped, batch, clip_eps=clip_eps, kl_beta=kl_beta)
-            accelerator.backward(loss / n_micro)
+            (loss / n_micro).backward()
             losses.append(loss.item())
             kls.append(kl)
-        if samples:
-            accelerator.clip_grad_norm_(params, 1.0)
+        sync_grads(params)
+        torch.nn.utils.clip_grad_norm_(params, 1.0)
         optimizer.step()
 
-        # ---- metrics (rank-local; W&B from rank 0) --------------------- #
-        n = len(trajs)
-        acc = sum(t.correct for t in trajs) / n
-        success_window.append(acc)
+        # ---- metrics over the whole data-parallel batch ------------------ #
         comp = probe_compression_noop([t.to_dict() for t in trajs], {i.id: i for i in picks})
+        sums = all_reduce_sums({
+            "n": len(trajs), "reward": sum(t.reward for t in trajs), "correct": sum(t.correct for t in trajs),
+            "ceiling": sum(t.ceiling_exceeded for t in trajs), "budget": sum(t.budget_exhausted for t in trajs),
+            "steps_ratio": sum(t.steps_used / t.min_steps for t in trajs),
+            "invalid": sum(t.n_invalid for t in trajs), "steps": sum(t.steps_used for t in trajs),
+            "compress_eps": comp["episodes_using_compress_rate"] * len(trajs),
+            "facts_kept": (comp["fact_retention_rate"] or 0.0) * comp["evidence_facts_compressed"],
+            "facts": comp["evidence_facts_compressed"],
+            "groups": len(picks), "usable": ginfo["usable_groups"] * len(picks), "samples": len(samples),
+            "loss": sum(losses), "kl": sum(kls), "micro": len(losses),
+        }, device)
+        n = max(sums["n"], 1)
+        acc = sums["correct"] / n
+        success_window.append(acc)
         metrics = {
-            "rollout/reward": sum(t.reward for t in trajs) / n, "rollout/accuracy": acc,
-            "rollout/ceiling_violation": sum(t.ceiling_exceeded for t in trajs) / n,
-            "rollout/budget_exhausted": sum(t.budget_exhausted for t in trajs) / n,
-            "rollout/steps_over_min": sum(t.steps_used / t.min_steps for t in trajs) / n,
-            "rollout/invalid_actions": sum(t.n_invalid for t in trajs) / max(sum(t.steps_used for t in trajs), 1),
-            "rollout/compress_usage": comp["episodes_using_compress_rate"],
-            "rollout/fact_retention": comp["fact_retention_rate"] or 0.0,
-            "train/usable_groups": ginfo["usable_groups"], "train/samples": len(samples),
-            "train/loss": sum(losses) / max(len(losses), 1), "train/kl": sum(kls) / max(len(kls), 1),
+            "rollout/reward": sums["reward"] / n, "rollout/accuracy": acc,
+            "rollout/ceiling_violation": sums["ceiling"] / n, "rollout/budget_exhausted": sums["budget"] / n,
+            "rollout/steps_over_min": sums["steps_ratio"] / n,
+            "rollout/invalid_actions": sums["invalid"] / max(sums["steps"], 1),
+            "rollout/compress_usage": sums["compress_eps"] / n,
+            "rollout/fact_retention": sums["facts_kept"] / max(sums["facts"], 1),
+            "train/usable_groups": sums["usable"] / max(sums["groups"], 1), "train/samples": sums["samples"],
+            "train/loss": sums["loss"] / max(sums["micro"], 1), "train/kl": sums["kl"] / max(sums["micro"], 1),
             "train/cur_hops": cur_hops, "time/elapsed_min": (time.time() - t0) / 60,
         }
         common.rank0_print(f"[step {step:>4}] " + " ".join(f"{k.split('/')[-1]}={v:.3f}" for k, v in metrics.items()))
