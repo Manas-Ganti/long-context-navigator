@@ -15,6 +15,13 @@ loop over per-step samples:
         episode inherits its episode's advantage
         loss = -E[min(ratio * A, clip(ratio) * A)] + beta * KL(policy || reference)
         reference = the same model with the LoRA adapter disabled
+        every EPISODE weighs the same: a step's loss is scaled by 1/(steps in
+        its episode). The first full run averaged over steps instead, so an
+        18-step budget-exhausted failure carried 9x the gradient of a 2-step
+        ceiling violation and the policy learned to be short rather than
+        right: over 60 steps accuracy fell 0.58 -> 0.37 while ceiling
+        violations rose 0.02 -> 0.20 and COMPRESS use fell. (GRPO's sequence-
+        level mean is exactly this episode-level weighting.)
 
 The reference must be the SFT policy, not the base model. So the SFT adapter
 is MERGED into the weights first and a fresh LoRA is trained on top: with the
@@ -79,11 +86,12 @@ def make_samples(trajs, instances_per_group: int, group_size: int) -> tuple[list
         for t, a in zip(group, adv):
             if a == 0.0:
                 continue
-            for s in t.steps:
-                if "completion_ids" in s and s["completion_ids"]:
-                    samples.append({"prompt_ids": s["prompt_ids"], "completion_ids": s["completion_ids"],
-                                    "advantage": a})
-    return samples, {"usable_groups": usable_groups / max(instances_per_group, 1)}
+            steps = [s for s in t.steps if s.get("completion_ids")]
+            for s in steps:
+                samples.append({"prompt_ids": s["prompt_ids"], "completion_ids": s["completion_ids"],
+                                "advantage": a, "weight": 1.0 / len(steps)})
+    return samples, {"usable_groups": usable_groups / max(instances_per_group, 1),
+                     "n_episodes": round(sum(s["weight"] for s in samples))}
 
 
 def sequence_logprobs(model, batch, pad_id: int):
@@ -112,8 +120,9 @@ def collate(samples: list[dict], pad_id: int, device):
         attn[i, :len(seq)] = 1
         cmask[i, len(s["prompt_ids"]):len(seq)] = 1
     adv = torch.tensor([s["advantage"] for s in samples], dtype=torch.float)
+    w = torch.tensor([s.get("weight", 1.0) for s in samples], dtype=torch.float)
     return {"input_ids": ids.to(device), "attention_mask": attn.to(device), "completion_mask": cmask.to(device),
-            "advantage": adv.to(device)}
+            "advantage": adv.to(device), "weight": w.to(device)}
 
 
 def sync_grads(params) -> None:
@@ -166,7 +175,8 @@ def grpo_loss(model, batch, *, clip_eps: float, kl_beta: float):
     per_tok = -surr + kl_beta * kl
     seq_loss = (per_tok * mask).sum(1) / mask.sum(1).clamp(min=1)
     kl_mean = ((kl * mask).sum() / mask.sum().clamp(min=1)).item()
-    return seq_loss.mean(), kl_mean
+    # episode-weighted SUM; the caller divides by the number of episodes
+    return (seq_loss * batch["weight"]).sum(), kl_mean
 
 
 def merge_sft_adapter(model_name: str, adapter: str, merged_dir, accelerator, tok) -> str:
@@ -323,13 +333,13 @@ def main(argv=None):
 
         # ---- update: local gradient, then averaged across ranks --------- #
         optimizer.zero_grad(set_to_none=True)
-        n_micro = max((len(samples) + args.micro_batch - 1) // args.micro_batch, 1)
+        n_episodes = max(ginfo["n_episodes"], 1)
         kls, losses = [], []
         for m in range(0, len(samples), args.micro_batch):
             batch = collate(samples[m:m + args.micro_batch], tok.pad_token_id, device)
             loss, kl = grpo_loss(unwrapped, batch, clip_eps=clip_eps, kl_beta=kl_beta)
-            (loss / n_micro).backward()
-            losses.append(loss.item())
+            (loss / n_episodes).backward()      # mean over episodes, not over steps
+            losses.append(loss.item() / n_episodes)
             kls.append(kl)
         sync_grads(params)
         torch.nn.utils.clip_grad_norm_(params, 1.0)
@@ -378,6 +388,8 @@ def main(argv=None):
                 tok.save_pretrained(out)
                 with open(os.path.join(out, "state.json"), "w") as f:
                     json.dump({"step": step + 1, "cur_hops": cur_hops}, f)
+                # keep a snapshot too (160 MB each) so intermediate policies can be evaluated
+                unwrapped.save_pretrained(os.path.join(out, "steps", f"step-{step + 1}"))
                 common.rank0_print(f"saved adapter to {out} at step {step + 1}")
     common.rank0_print("done")
 
