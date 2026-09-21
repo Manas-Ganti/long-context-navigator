@@ -358,6 +358,12 @@ SBATCH_ACCOUNT=ece-6524-spring2026 MAIL_USER=$USER@vt.edu BASELINES_OK=1 ./scrip
 Calibrate GRPO wall-clock with `... scripts/arc_grpo.slurm --max-steps 5` before a long
 allocation; the launcher saves the adapter every `save_every` steps and resumes with `RESUME=`.
 
+## What went wrong along the way
+
+Every failed run, its actual cause, the fix and the transferable rule is in
+[`docs/LESSONS.md`](docs/LESSONS.md) — nine incidents from a JIT-compiled sampler
+with no compiler on the node to a GRPO objective that rewarded short episodes.
+
 ## Repository
 
 ```
