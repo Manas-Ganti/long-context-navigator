@@ -113,7 +113,7 @@ class CurriculumConfig(BaseModel):
 class GRPOConfig(BaseModel):
     group_size: int = 8
     instances_per_step: int = 4
-    learning_rate: float = 1e-6
+    learning_rate: float = 1e-5
     kl_beta: float = 0.04
     clip_eps: float = 0.2
     max_steps: int = 400

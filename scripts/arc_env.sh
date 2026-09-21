@@ -34,6 +34,11 @@ export TRANSFORMERS_VERBOSITY=warning
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export PYTHONUNBUFFERED=1
+# accelerate imports DeepSpeed when it is installed, and DeepSpeed's Triton
+# autotune cache defaults to $HOME (NFS) — it warns and can hang at exit. Put
+# it on the node-local scratch SLURM provides.
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${TMPDIR:-/localscratch-nvme/${SLURM_JOB_ID:-$$}}/triton}"
+mkdir -p "$TRITON_CACHE_DIR" 2>/dev/null || export TRITON_CACHE_DIR="$HOME/.triton"
 
 # ---- W&B ------------------------------------------------------------------ #
 # Credentials come from ONE of these, checked in order. Never put the key in

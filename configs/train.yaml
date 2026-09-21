@@ -33,7 +33,9 @@ sft:
 grpo:
   group_size: 8           # G rollouts per instance
   instances_per_step: 4   # per rank
-  learning_rate: 1.0e-6
+  learning_rate: 1.0e-5   # LoRA rate. 1e-6 (a full-finetune rate) left a fresh adapter at kl=0.000
+                          # for 10 steps: with Adam each step moves a weight ~lr, so 150 steps at
+                          # 1e-6 is ~40x less movement than the SFT that produced the policy.
   kl_beta: 0.04
   clip_eps: 0.2
   max_steps: 400
