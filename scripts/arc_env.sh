@@ -178,7 +178,12 @@ else
   echo "[arc_env] no nvcc on $(hostname); FlashInfer JIT disabled (VLLM_USE_FLASHINFER_SAMPLER=$VLLM_USE_FLASHINFER_SAMPLER)"
 fi
 
-export CONDA_ENV="${CONDA_ENV:-lcn}"
+# No bare-name default: ~/.bashrc may export CONDA_ENV for ANOTHER project (the
+# sibling VLM repo exports `vrr`), and sbatch --export=ALL carries it in. A job
+# then runs in an env that has numpy/pydantic/yaml but not longctx, and dies
+# four ranks deep with ModuleNotFoundError. Require an absolute path pointing at
+# an env that actually has this package (checked below).
+export CONDA_ENV="${CONDA_ENV:-/home/$USER/miniconda3/envs/lcn}"
 if [ -x "$CONDA_ENV/bin/python" ]; then
   # PY is the interpreter every launcher must use. Resolving `python` through
   # PATH proved unreliable on ARC — a bare `python` here ran, printed nothing and
@@ -209,9 +214,13 @@ if os.path.isabs(env) and not sys.executable.startswith(os.path.realpath(env)) \
    and not sys.executable.startswith(env):
     sys.exit("[arc_env] FATAL: interpreter is not inside " + env)
 try:
-    import numpy, pydantic, yaml  # cheap proxy for "requirements are installed here"
+    import longctx  # the package this repo IS; a sibling project's env will not have it
+    print("[arc_env] longctx=" + os.path.dirname(longctx.__file__), flush=True)
 except ImportError as e:
-    sys.exit("[arc_env] FATAL: %s in %s" % (e, sys.executable))
+    sys.exit("[arc_env] FATAL: %s in %s\n"
+             "[arc_env]        Wrong conda env? Pass CONDA_ENV=/home/$USER/miniconda3/envs/lcn "
+             "on the submit line (a CONDA_ENV exported by ~/.bashrc for another project wins "
+             "over this file's default via sbatch --export=ALL)." % (e, sys.executable))
 ' || { echo "[arc_env] FATAL: python check failed (PY=$PY)" >&2; return 1 2>/dev/null || exit 1; }
 
 cd "$PROJECT_DIR"
