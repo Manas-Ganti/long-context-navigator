@@ -339,7 +339,7 @@ def main(argv=None):
             batch = collate(samples[m:m + args.micro_batch], tok.pad_token_id, device)
             loss, kl = grpo_loss(unwrapped, batch, clip_eps=clip_eps, kl_beta=kl_beta)
             (loss / n_episodes).backward()      # mean over episodes, not over steps
-            losses.append(loss.item() / n_episodes)
+            losses.append(loss.item())          # summed over micro-batches below
             kls.append(kl)
         sync_grads(params)
         torch.nn.utils.clip_grad_norm_(params, 1.0)
@@ -356,7 +356,7 @@ def main(argv=None):
             "facts_kept": (comp["fact_retention_rate"] or 0.0) * comp["evidence_facts_compressed"],
             "facts": comp["evidence_facts_compressed"],
             "groups": len(picks), "usable": ginfo["usable_groups"] * len(picks), "samples": len(samples),
-            "loss": sum(losses), "kl": sum(kls), "micro": len(losses),
+            "loss": sum(losses) / n_episodes, "kl": sum(kls), "micro": len(losses), "ranks": 1,
         }, device)
         n = max(sums["n"], 1)
         acc = sums["correct"] / n
@@ -369,7 +369,7 @@ def main(argv=None):
             "rollout/compress_usage": sums["compress_eps"] / n,
             "rollout/fact_retention": sums["facts_kept"] / max(sums["facts"], 1),
             "train/usable_groups": sums["usable"] / max(sums["groups"], 1), "train/samples": sums["samples"],
-            "train/loss": sums["loss"] / max(sums["micro"], 1), "train/kl": sums["kl"] / max(sums["micro"], 1),
+            "train/loss": sums["loss"] / max(sums["ranks"], 1), "train/kl": sums["kl"] / max(sums["micro"], 1),
             "train/cur_hops": cur_hops, "time/elapsed_min": (time.time() - t0) / 60,
         }
         common.rank0_print(f"[step {step:>4}] " + " ".join(f"{k.split('/')[-1]}={v:.3f}" for k, v in metrics.items()))
