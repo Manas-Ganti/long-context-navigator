@@ -214,13 +214,13 @@ if os.path.isabs(env) and not sys.executable.startswith(os.path.realpath(env)) \
    and not sys.executable.startswith(env):
     sys.exit("[arc_env] FATAL: interpreter is not inside " + env)
 try:
-    import longctx  # the package this repo IS; a sibling project's env will not have it
+    import longctx  # the package this repo IS; a sibling env will not have it
     print("[arc_env] longctx=" + os.path.dirname(longctx.__file__), flush=True)
 except ImportError as e:
     sys.exit("[arc_env] FATAL: %s in %s\n"
              "[arc_env]        Wrong conda env? Pass CONDA_ENV=/home/$USER/miniconda3/envs/lcn "
-             "on the submit line (a CONDA_ENV exported by ~/.bashrc for another project wins "
-             "over this file's default via sbatch --export=ALL)." % (e, sys.executable))
+             "on the submit line: a CONDA_ENV exported by ~/.bashrc for another project wins "
+             "over this default via sbatch --export=ALL." % (e, sys.executable))
 ' || { echo "[arc_env] FATAL: python check failed (PY=$PY)" >&2; return 1 2>/dev/null || exit 1; }
 
 cd "$PROJECT_DIR"
