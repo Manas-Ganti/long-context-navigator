@@ -307,6 +307,33 @@ chunk in view reaches 0.93 at 3 hops; navigating under 600 tokens it reaches 0.5
 composition-generalisation question is now whether GRPO — trained only on ≤3 hops — closes
 either gap.
 
+### GRPO, first full run (LoRA lr 1e-5): the policy did not move
+
+Held-out evaluation of adapter snapshots against the SFT policy they started
+from (600 instances, sampled decoding, same audit):
+
+| policy | ID (2–3) | OOD (4–5) | ceiling viol. ID / OOD | retention ID / OOD | re-read episodes |
+|---|---|---|---|---|---|
+| SFT (= GRPO step 0) | 0.630 | 0.050 | 0.000 / 0.017 | 0.982 / 0.599 | 0.588 |
+| GRPO step 20 | 0.653 | 0.077 | 0.017 / 0.060 | 0.973 / 0.651 | 0.585 |
+| GRPO step 40 | 0.600 | 0.053 | 0.060 / 0.193 | 0.968 / 0.736 | 0.415 |
+| GRPO step 60 | 0.623 | 0.060 | 0.017 / 0.100 | 0.965 / 0.627 | 0.512 |
+
+Every accuracy difference is inside ~2 standard errors (0.028 ID, 0.014 OOD at
+n=300) and non-monotone, so this run changed nothing measurable — as its
+training log predicted: `kl` reached only 0.007 in 65 steps, because splitting
+each episode's loss across its ~6 steps (the length-bias fix, below) cut the
+gradient about 6× and the learning rate was not raised with it. The run is kept
+as a **control**: it confirms the evaluation path tracks the adapter, and it is
+the baseline the higher-rate run is compared against.
+
+Two things the run did establish. The length-bias fix holds: over 65 training
+steps ceiling violations stayed at 0.01–0.05 and `COMPRESS` usage at ~1.0,
+where the previous objective drove them to 0.20 and 0.85. And OOD ceiling
+violations rose above the SFT policy's 0.017 at every snapshot — training on
+≤3 hops may cost ceiling discipline at 4–5, which is worth watching once the
+policy actually moves.
+
 ## Evaluation
 
 `longctx evaluate` reports, on held-out generated instances: accuracy by `n_hops`; in-distribution

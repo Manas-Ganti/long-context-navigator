@@ -255,6 +255,33 @@ weight per group.
 
 ---
 
+## 11. Judging a run by its training curve instead of held-out evaluation
+
+**Symptom.** Rollout accuracy in the GRPO log swung between 0.27 and 0.85
+step to step. It was tempting to read decade averages (0.66 → 0.67 → 0.60 →
+0.64) as a trend.
+
+**What it actually was.** Nothing — noise. Rollout accuracy is 128 sampled
+episodes per step at temperature 0.8, drawn from fresh random *training*
+instances (≤3 hops). Binomial noise alone is ±0.04, instance-difficulty
+variance adds more, and the quantity of interest (4–5-hop generalisation) is
+not in that number at all, because the policy never trains on those.
+
+**Fix.** Save an adapter snapshot every N steps and evaluate snapshots on the
+fixed held-out set. Three 1-GPU evals gave a straight answer (flat ID, flat
+OOD) where 65 steps of training curve gave an argument. Steer during a run by
+the *mechanism* metrics instead — ceiling violations, compression usage, fact
+retention, invalid actions — which sit near their bounds and move far outside
+noise when something is wrong.
+
+**How to spot it elsewhere.** Ask of any training-curve number: how many
+samples, on which distribution, and is it the quantity the project is about?
+If the answer is "few, train, no", it is a health check, not a result. Budget
+for snapshot evaluation from the start — it is cheap next to the training run
+and it is the only thing that answers the question.
+
+---
+
 ## The pattern across all of them
 
 - **Zero or suspiciously round numbers are harness problems until proven
