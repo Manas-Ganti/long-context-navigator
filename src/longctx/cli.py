@@ -116,7 +116,14 @@ def cmd_build(args):
     print(f"wrote {out}/generation_report.json")
     if not ok:
         print("SURFACE CONFOUND DETECTED — fix the layout before training", file=sys.stderr)
-        sys.exit(1)
+        if not args.allow_confound:
+            sys.exit(1)
+        # Recorded, never silent: the violation is written into the report and
+        # stamped on every instance, and the single-chunk baseline becomes the
+        # decisive gate — it measures whether the chunk can be ANSWERED from,
+        # which is what the audit is a cheap proxy for.
+        print("--allow-confound: writing anyway. The single-chunk baseline is now the gate; "
+              "report this violation alongside any result from this data.", file=sys.stderr)
 
 
 def cmd_inspect(args):
@@ -281,6 +288,10 @@ def main(argv=None):
                    help="e.g. train:train:2000 id_test:validation:300")
     p.add_argument("--doc-tokens", type=int, default=32000)
     p.add_argument("--rows-limit", type=int, default=None, help="cap rows read from the source")
+    p.add_argument("--allow-confound", action="store_true",
+                   help="write the split even if the confound audit fails. Use only when the "
+                        "violation is understood and the single-chunk baseline will be run as "
+                        "the real gate; the violation is recorded in the report either way.")
     p.add_argument("--para-tokens", type=int, nargs=2, default=[40, 260], metavar=("MIN", "MAX"),
                    help="outer sanity bound on paragraph length; within it, filler is "
                         "length-matched to each row's own supporting paragraphs")
