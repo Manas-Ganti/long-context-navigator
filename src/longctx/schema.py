@@ -57,6 +57,8 @@ class Instance(BaseModel):
     min_reads: int
     min_steps: int
     compression_required: bool
+    answer_aliases: list[str] = Field(default_factory=list)  # accepted surface forms (real substrates)
+    substrate: str = "synthetic"
     generator: dict = Field(default_factory=dict)
     env: dict = Field(default_factory=dict)
 

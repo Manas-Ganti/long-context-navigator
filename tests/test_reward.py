@@ -90,3 +90,15 @@ def test_answer_matching(pred, truth, ok):
 def test_normalize():
     assert normalize_answer(" $4,885,866 ") == "4885866"
     assert normalize_answer(None) == ""
+
+
+def test_aliases_accepted_when_supplied():
+    o = outcome(answer="JFK", ground_truth="John F. Kennedy")
+    assert compute_reward(o, CFG) == CFG.r_wrong
+    o2 = outcome(answer="JFK", ground_truth="John F. Kennedy", answer_aliases=("Jack Kennedy", "JFK"))
+    assert compute_reward(o2, CFG) > 0
+
+
+def test_aliases_do_not_loosen_matching_elsewhere():
+    assert not answer_matches("Robert Kennedy", "John F. Kennedy", ("JFK",))
+    assert answer_matches("  jfk. ", "John F. Kennedy", ("JFK",))

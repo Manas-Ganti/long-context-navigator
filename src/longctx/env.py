@@ -187,7 +187,8 @@ class NavigationEnv:
         return EpisodeOutcome(
             ceiling_exceeded=self.ceiling_exceeded, budget_exhausted=self.budget_exhausted,
             answered=self.answer is not None, answer=self.answer, ground_truth=self.inst.answer,
-            steps_used=self.steps_used, min_steps=self.inst.min_steps)
+            steps_used=self.steps_used, min_steps=self.inst.min_steps,
+            answer_aliases=tuple(self.inst.answer_aliases))
 
     def _final_reward(self) -> float:
         return compute_reward(self.outcome(), self.cfg.reward)
@@ -198,7 +199,8 @@ class NavigationEnv:
             "done": self.done, "steps_used": self.steps_used, "used_tokens": self.used_tokens,
             "ceiling_exceeded": o.ceiling_exceeded, "budget_exhausted": o.budget_exhausted,
             "answered": o.answered, "answer": o.answer,
-            "correct": bool(o.answered and not o.ceiling_exceeded and answer_matches(o.answer, o.ground_truth)),
+            "correct": bool(o.answered and not o.ceiling_exceeded
+                            and answer_matches(o.answer, o.ground_truth, o.answer_aliases)),
             "reads": list(self.read_log), "n_reads": len(self.read_log),
             "n_compress": self.n_summaries, "n_drop": sum(1 for r in self.records if r.kind == DROP and r.ok),
             "n_errors": sum(1 for r in self.records if r.error),

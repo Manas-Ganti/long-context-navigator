@@ -116,7 +116,8 @@ def llm_baselines(instances: list[Instance], backend, conditions=("no-read", "si
             for inst, txt in zip(batch, texts):
                 pred = extract_answer(txt)
                 rows.append({"instance_id": inst.id, "n_hops": inst.n_hops, "pred": pred,
-                             "truth": inst.answer, "correct": answer_matches(pred, inst.answer),
+                             "truth": inst.answer,
+                             "correct": answer_matches(pred, inst.answer, inst.answer_aliases),
                              "abstained": normalize_answer(pred) == "unknown",
                              "matches_distractor": any(normalize_answer(pred) == normalize_answer(v)
                                                        for d in inst.distractors for v in (d.value, d.wrong_answer) if v),

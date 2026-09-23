@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Sequence
 
 from .config import RewardConfig
 
@@ -30,6 +31,7 @@ class EpisodeOutcome:
     ground_truth: str
     steps_used: int
     min_steps: int
+    answer_aliases: tuple[str, ...] = ()
 
 
 def normalize_answer(text: str | None) -> str:
@@ -40,19 +42,29 @@ def normalize_answer(text: str | None) -> str:
     return _ALNUM.sub("", text.strip().lower())
 
 
-def answer_matches(pred: str | None, truth: str) -> bool:
-    """Normalised exact match, plus one mechanical leniency for numeric truths:
-    a prediction that contains exactly one digit run (commas stripped) equal to
-    the truth's digits matches — so 'USD 4,885,866' counts, '4,885,866 or
-    4,885,870' does not."""
-    p, t = normalize_answer(pred), normalize_answer(truth)
-    if not p or not t:
+def answer_matches(pred: str | None, truth: str, aliases: Sequence[str] = ()) -> bool:
+    """Normalised exact match against the truth or any accepted alias, plus one
+    mechanical leniency for numeric truths: a prediction containing exactly one
+    digit run (commas stripped) equal to the truth's digits matches — so
+    'USD 4,885,866' counts, '4,885,866 or 4,885,870' does not.
+
+    Aliases come from the substrate, not from a model: the synthetic generator
+    supplies none (its answers are exact codes and values), while a real
+    dataset ships the accepted surface forms of the same entity. No judge is
+    involved either way."""
+    p = normalize_answer(pred)
+    if not p:
         return False
-    if p == t:
-        return True
-    if t.isdigit():
-        runs = _DIGIT_RUN.findall((pred or "").replace(",", ""))
-        return len(runs) == 1 and runs[0] == t
+    for candidate in (truth, *aliases):
+        t = normalize_answer(candidate)
+        if not t:
+            continue
+        if p == t:
+            return True
+        if t.isdigit():
+            runs = _DIGIT_RUN.findall((pred or "").replace(",", ""))
+            if len(runs) == 1 and runs[0] == t:
+                return True
     return False
 
 
@@ -69,7 +81,7 @@ def compute_reward(o: EpisodeOutcome, cfg: RewardConfig) -> float:
         return cfg.r_fail
     if is_abstention(o.answer, cfg):
         return cfg.r_abstain
-    if answer_matches(o.answer, o.ground_truth):
+    if answer_matches(o.answer, o.ground_truth, o.answer_aliases):
         if o.min_steps <= 0:
             raise ValueError("min_steps must be positive")
         return max(cfg.r_correct_min, 1.0 - cfg.beta * (o.steps_used / o.min_steps))
