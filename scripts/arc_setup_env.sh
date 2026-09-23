@@ -20,7 +20,8 @@ PY="$PREFIX/bin/python"
 "$PY" -m pip install --upgrade pip
 "$PY" -m pip install "vllm>=0.8"
 "$PY" -m pip install "transformers>=4.51" "peft>=0.14" "accelerate>=1.4" \
-                     "deepspeed>=0.16" "wandb>=0.18" "hf-transfer>=0.1"
+                     "deepspeed>=0.16" "wandb>=0.18" "hf-transfer>=0.1" \
+                     "datasets>=3.0"          # real-text substrates (MuSiQue)
 "$PY" -m pip install -e "$(dirname "${BASH_SOURCE[0]}")/.."[test]
 
 echo "--- verify (no GPU needed) ---"

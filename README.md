@@ -385,6 +385,59 @@ SBATCH_ACCOUNT=ece-6524-spring2026 MAIL_USER=$USER@vt.edu BASELINES_OK=1 ./scrip
 Calibrate GRPO wall-clock with `... scripts/arc_grpo.slurm --max-steps 5` before a long
 allocation; the launcher saves the adapter every `save_every` steps and resumes with `RESUME=`.
 
+## Looking at the data
+
+`longctx inspect` renders any instance file as one readable Markdown document —
+summary statistics, the confound audit, a few instances rendered completely
+(question, the chain hop by hop with token offsets, every distractor with the
+wrong answer it would produce, the document map, the evidence chunks verbatim),
+and an index of every instance in the split.
+
+```bash
+longctx inspect --instances data/v1/id_test.jsonl --out docs/dataset_v1_id_test.md
+longctx inspect --instances data/v1/id_test.jsonl --out /tmp/everything.md --full   # every chunk, ~2 GB
+pandoc -V geometry:margin=2cm -o dataset.pdf docs/dataset_v1_id_test.md             # if you want PDF
+```
+
+Pre-rendered: [`docs/dataset_v1_id_test.md`](docs/dataset_v1_id_test.md) and the
+other splits alongside it.
+
+## A second substrate: real text (MuSiQue)
+
+The synthetic corpus deliberately strips every semantic cue so that no lexical
+feature can predict the answer — and the diagnostic showed what that costs:
+**44% of the SFT policy's reads land on a chunk that does not hold the entity it
+is looking for, at every depth** (0.437 at 2–3 hops, 0.436 at 4–5), because the
+only way to locate an entry is alphabetical comparison against range labels.
+Re-reads, the genuine compression failure, scale with depth separately
+(0.164 → 0.351). Hops resolved sits at ~1.9 regardless of how many are needed:
+search consumes the step budget.
+
+So a second substrate lays **real Wikipedia paragraphs** into the same chunk
+format, from [MuSiQue](https://huggingface.co/datasets/dgslibisey/MuSiQue) —
+chosen because it composes multi-hop questions from single-hop ones and was
+built so that removing a hop makes the question unanswerable, which is exactly
+what the single-chunk baseline tests. Each supporting paragraph seeds its own
+chunk, chunks are padded to the same token band with paragraphs borrowed from
+other rows, placement is rejection-sampled until the separation constraint
+holds, and the map lists paragraph titles — so navigation is semantic rather
+than a string-ordering puzzle. Everything downstream is unchanged.
+
+```bash
+longctx build --substrate musique --out data/musique \
+    --splits train:train:2000 id_test:validation:300
+longctx inspect --instances data/musique/id_test.jsonl --out docs/dataset_musique.md
+```
+
+What transfers: evidence locations, `min_steps`, the ceiling, separation, the
+confound audit, and the intermediate hop answers recorded as known distractors.
+What does not, stated plainly: the synthetic generator *proves* each instance is
+solvable and that no distractor path reaches the answer, by re-deriving the
+answer from the text with a parser. On natural language that proof is
+unavailable — `validate_real` checks what it can (evidence present, separation,
+the answer present in the final evidence chunk and nowhere else) and the rest
+rests on the dataset's annotations.
+
 ## What went wrong along the way
 
 Every failed run, its actual cause, the fix and the transferable rule is in

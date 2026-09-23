@@ -83,6 +83,64 @@ def cmd_generate(args):
         sys.exit(1)
 
 
+def cmd_build(args):
+    """Build instances from a real-text substrate (MuSiQue)."""
+    from .substrates.musique import build_split, load_rows
+    from .validate_instance import confound_audit
+
+    gen, env = load_generator_config(args.generator_config), load_env_config(args.env_config)
+    for w in check_configs_consistent(env, gen):
+        print(f"CONFIG WARNING: {w}", file=sys.stderr)
+    out = resolve_path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    report = {"substrate": args.substrate, "generator": gen.model_dump(), "env": env.model_dump(),
+              "splits": {}, "confound": {}}
+    ok = True
+    for spec in args.splits:
+        name, source, n = spec.split(":")
+        print(f"[{name}] loading {source} …", file=sys.stderr)
+        rows = load_rows(source, hf_id=args.hf_id, limit=args.rows_limit)
+        insts, stats = build_split(rows, gen, env, split=name, n=int(n), doc_tokens=args.doc_tokens,
+                                   seed_base=args.seed, progress=_progress(f"[{name}]"))
+        write_jsonl(out / f"{name}.jsonl", insts)
+        aud = confound_audit(insts, gen.confound_tolerance)
+        report["splits"][name], report["confound"][name] = stats, aud
+        ok &= aud["passed"]
+        print(f"{name}: {stats['n']} instances from {stats['rows_consumed']} rows; "
+              f"skipped {sum(stats['skipped'].values())} {stats['skipped']}; "
+              f"validation-rejected {stats['rejected_by_validation']}; confound audit "
+              f"{'PASSED' if aud['passed'] else 'FAILED ' + str(aud['violations'])}")
+    with open(out / "generation_report.json", "w") as f:
+        json.dump(report, f, indent=1)
+    print(f"wrote {out}/generation_report.json")
+    if not ok:
+        print("SURFACE CONFOUND DETECTED — fix the layout before training", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_inspect(args):
+    from .inspect_doc import build_document, write_document
+
+    env = load_env_config(args.env_config)
+    insts = _load_many(args.instances)
+    stats = confound = None
+    report = resolve_path(args.instances[0]).parent / "generation_report.json"
+    if report.exists():
+        data = json.loads(report.read_text())
+        split = resolve_path(args.instances[0]).stem
+        stats = data.get("splits", {}).get(split)
+        confound = data.get("confound", {}).get(split)
+    if args.full and len(insts) > 50:
+        print(f"WARNING --full on {len(insts)} instances writes roughly "
+              f"{sum(i.doc_tokens for i in insts) * 6 // 1_000_000} MB of markdown",
+              file=sys.stderr)
+    doc = build_document(insts, env, title=args.title or f"Dataset: {', '.join(args.instances)}",
+                         examples=args.examples, stats=stats, confound=confound, full=args.full)
+    path = write_document(doc, resolve_path(args.out))
+    print(f"wrote {path} ({len(doc) / 1_000_000:.1f} MB, {doc.count(chr(10)) + 1} lines)")
+    print("PDF:  pandoc -V geometry:margin=2cm -o out.pdf " + str(path))
+
+
 def cmd_validate(args):
     from .validate_instance import confound_audit, validate
 
@@ -211,6 +269,27 @@ def main(argv=None):
     p.add_argument("--splits", nargs="*", default=None)
     p.add_argument("--limit", type=int, default=None, help="cap instances per split (smoke runs)")
     p.set_defaults(fn=cmd_generate)
+
+    p = sub.add_parser("build", help="build instances from a real-text substrate (MuSiQue)")
+    common_cfg(p)
+    p.add_argument("--substrate", choices=["musique"], default="musique")
+    p.add_argument("--hf-id", default="dgslibisey/MuSiQue")
+    p.add_argument("--out", default="data/musique")
+    p.add_argument("--splits", nargs="+", default=["train:train:2000", "id_test:validation:300"],
+                   metavar="NAME:SOURCE_SPLIT:N",
+                   help="e.g. train:train:2000 id_test:validation:300")
+    p.add_argument("--doc-tokens", type=int, default=32000)
+    p.add_argument("--rows-limit", type=int, default=None, help="cap rows read from the source")
+    p.set_defaults(fn=cmd_build)
+
+    p = sub.add_parser("inspect", help="render a dataset as one readable Markdown document")
+    common_cfg(p)
+    p.add_argument("--instances", nargs="+", required=True)
+    p.add_argument("--out", default="docs/dataset.md")
+    p.add_argument("--examples", type=int, default=3, help="instances rendered in full")
+    p.add_argument("--full", action="store_true", help="also render EVERY chunk of EVERY instance (large)")
+    p.add_argument("--title", default=None)
+    p.set_defaults(fn=cmd_inspect)
 
     p = sub.add_parser("validate", help="re-validate instance files and re-run the confound audit")
     common_cfg(p)

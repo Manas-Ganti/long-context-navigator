@@ -9,3 +9,4 @@ results/*/*.trajectories.jsonl
 __pycache__/
 *.egg-info/
 .pytest_cache/
+docs/dataset_*_full.md
