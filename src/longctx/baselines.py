@@ -30,6 +30,23 @@ def answer_values_in_chunk(inst: Instance, idx: int) -> list[str]:
 
 
 def mechanical_baselines(instances: list[Instance], seed: int = 0) -> dict:
+    """Exact expectations, computed with no model — synthetic substrate only.
+
+    Every quantity here needs something only a generated corpus has: the set of
+    values of the answer's type (for chance level), a parser that can list a
+    chunk's candidate answers, and a mechanical reader that re-derives the
+    answer from the text. On a real-text substrate none of those exist, so the
+    LLM baselines carry the gate alone. Returning a clear "not applicable" is
+    the honest answer; guessing one would put a meaningless number in a table
+    that decides whether to train.
+    """
+    other = sorted({i.substrate for i in instances} - {"synthetic"})
+    if other:
+        return {"n": len(instances), "applicable": False, "substrate": other,
+                "reason": ("mechanical baselines need generated ground truth: enumerable candidate "
+                           "answers, parseable chunk entries and a mechanical chain reader. Use the "
+                           "LLM baselines (--mode llm) for this substrate."),
+                "by_hops": {}, "overall": {}}
     rng = random.Random(seed)
     by_hops: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for inst in instances:
@@ -47,7 +64,7 @@ def mechanical_baselines(instances: list[Instance], seed: int = 0) -> dict:
         # full document: the mechanical reader follows the chain from the text
         ans, _ = solve_from_text(inst)
         b["full_document_oracle"].append(float(ans == inst.answer))
-    out = {"n": len(instances), "by_hops": {}, "overall": {}}
+    out = {"n": len(instances), "applicable": True, "by_hops": {}, "overall": {}}
     keys = set(k for b in by_hops.values() for k in b)
     for h in sorted(by_hops):
         out["by_hops"][h] = {k: sum(v) / len(v) for k, v in by_hops[h].items()} | {"n": len(by_hops[h]["full_document_oracle"])}
@@ -137,6 +154,17 @@ def llm_baselines(instances: list[Instance], backend, conditions=("no-read", "si
 
 def baseline_table(mech: dict, llm: dict | None = None) -> str:
     lines = ["| baseline | mode | accuracy | by n_hops |", "|---|---|---|---|"]
+    if not mech.get("applicable", True):
+        lines.append(f"| *(mechanical baselines not applicable: {', '.join(mech['substrate'])} "
+                     f"substrate)* | — | — | — |")
+        if llm:
+            mode = "LLM, reasoning" if llm.get("reasoning") else "LLM, answer-only"
+            for cond, r in llm["conditions"].items():
+                bh = ", ".join(f"{h}: {v:.3f}" for h, v in r["by_hops"].items())
+                lines.append(f"| {cond} (abstain {r['abstain_rate']:.2f}, "
+                             f"distractor {r['distractor_rate']:.2f}) | {mode} | "
+                             f"{r['accuracy']:.3f} | {bh} |")
+        return "\n".join(lines)
     o = mech["overall"]
     def hops(key):
         return ", ".join(f"{h}: {v[key]:.3f}" for h, v in mech["by_hops"].items())

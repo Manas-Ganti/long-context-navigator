@@ -169,6 +169,9 @@ def cmd_validate(args):
 def cmd_baselines(args):
     insts = _load_many(args.instances)
     mech = mechanical_baselines(insts, seed=args.seed)
+    if not mech.get("applicable", True) and args.mode != "llm":
+        print(f"mechanical baselines not applicable: {mech['reason']}", file=sys.stderr)
+        sys.exit(2)
     llm = None
     if args.mode == "llm":
         from .llm import build_backend

@@ -105,3 +105,22 @@ def test_teacher_shows_the_navigation_comparison(env_cfg, instances):
         assert "sorts at or after" in r or "runs '" in r or "is the entry for" in r, r
         # and the names it compares against must be visible in that step's prompt
         assert all(part in s["prompt"] for part in [f"[{s['ids'][0]}]"])
+
+
+def test_mechanical_baselines_refuse_non_synthetic_substrates(instances):
+    """They need generated ground truth; on a real-text substrate they must say
+    so rather than crash or invent a number."""
+    import copy
+
+    from longctx.baselines import baseline_table, mechanical_baselines
+
+    real = []
+    for inst in instances[:5]:
+        c = copy.deepcopy(inst)
+        c.substrate = "musique"
+        c.candidate_answers = []
+        real.append(c)
+    rep = mechanical_baselines(real)
+    assert rep["applicable"] is False and rep["substrate"] == ["musique"]
+    assert "not applicable" in baseline_table(rep)
+    assert mechanical_baselines(instances[:5])["applicable"] is True
