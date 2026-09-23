@@ -80,3 +80,15 @@ def test_leak_filter_catches_privileged_write(env_cfg, instances):
     t.steps[0]["kind"], t.steps[0]["ids"], t.steps[0]["ok"] = "READ", [str(inst.answer_chunk)], True
     if inst.n_hops >= 2:
         assert leak_check(t, inst)
+
+
+def test_diagnose_separates_search_from_memory(env_cfg, instances):
+    """On oracle trajectories every READ is on target and nothing is wasted."""
+    from longctx.diagnose import diagnose
+
+    trs = run_episodes(env_cfg, OracleNavigator(), instances)
+    rep = diagnose([t.to_dict() for t in trs], instances)
+    assert rep["all"]["read_precision_on_target"] == 1.0
+    assert rep["all"]["wasted_read_steps_per_episode"] == 0.0
+    assert rep["all"]["outcomes"]["correct"] == 1.0
+    assert rep["all"]["hops_resolved_per_episode"] == rep["all"]["hops_needed_per_episode"]

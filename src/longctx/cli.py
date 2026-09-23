@@ -177,6 +177,23 @@ def cmd_audit(args):
     print(f"wrote {out}")
 
 
+def cmd_diagnose(args):
+    from .diagnose import diagnose, markdown
+
+    insts = _load_many(args.instances)
+    trajs = list(read_jsonl(resolve_path(args.trajectories)))
+    rep = diagnose(trajs, insts)
+    print(markdown(rep))
+    if args.out:
+        out = resolve_path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as f:
+            json.dump(rep, f, indent=1)
+        with open(out.with_suffix(".md"), "w") as f:
+            f.write(markdown(rep) + "\n")
+        print(f"wrote {out}")
+
+
 # --------------------------------------------------------------------------- #
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="longctx")
@@ -237,6 +254,13 @@ def main(argv=None):
     p.add_argument("--record-prompts", action="store_true")
     p.add_argument("--out", default="results/eval")
     p.set_defaults(fn=cmd_evaluate)
+
+    p = sub.add_parser("diagnose", help="where the steps go: failure mix, and search vs memory waste")
+    common_cfg(p)
+    p.add_argument("--instances", nargs="+", required=True)
+    p.add_argument("--trajectories", required=True)
+    p.add_argument("--out", default=None)
+    p.set_defaults(fn=cmd_diagnose)
 
     p = sub.add_parser("audit", help="the five reward-hacking probes over a trajectory file")
     common_cfg(p)
