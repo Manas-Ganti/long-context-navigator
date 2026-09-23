@@ -29,9 +29,29 @@ def _outcome(t: dict) -> str:
     return "wrong_answer"
 
 
+def _section_positions(inst: Instance) -> dict[int, tuple[str, int, int]]:
+    """chunk idx -> (section, position within its section, section length)."""
+    order: dict[str, list[int]] = defaultdict(list)
+    for c in inst.chunks:
+        order[c.section].append(c.idx)
+    out = {}
+    for sec, idxs in order.items():
+        for pos, idx in enumerate(idxs):
+            out[idx] = (sec, pos, len(idxs))
+    return out
+
+
 def classify_reads(t: dict, inst: Instance) -> dict:
-    """Walk the episode, tracking which hop the policy still needs."""
+    """Walk the episode, tracking which hop the policy still needs.
+
+    For an off-target read, also record how far it landed from the chunk that
+    holds the wanted entity, measured in positions within the same register.
+    Adjacent misses mean the map is being used and the alphabetical comparison
+    is imprecise; scattered misses mean the map is not being used at all. The
+    two call for different fixes (task affordances vs teacher demonstrations).
+    """
     ev_chunk = {e.chunk_idx: e.hop for e in inst.evidence}
+    pos_of = _section_positions(inst)
     resolved = 0                       # hops whose value the policy has seen
     seen: set[int] = set()
     counts = Counter()
@@ -48,6 +68,18 @@ def classify_reads(t: dict, inst: Instance) -> dict:
             counts["out_of_order"] += 1    # an evidence chunk, but not the one needed yet
         else:
             counts["off_target"] += 1
+            want = inst.evidence[resolved].chunk_idx if resolved < len(inst.evidence) else None
+            if want is not None and idx in pos_of and want in pos_of:
+                (sec_a, pos_a, _), (sec_b, pos_b, n_b) = pos_of[idx], pos_of[want]
+                if sec_a != sec_b:
+                    counts["miss_wrong_section"] += 1
+                else:
+                    d = abs(pos_a - pos_b)
+                    counts["miss_right_section"] += 1
+                    counts["miss_distance_sum"] += d
+                    counts["miss_adjacent"] += int(d <= 1)
+                    # distance expected if a chunk were picked at random in that section
+                    counts["miss_distance_chance_sum"] += sum(abs(p - pos_b) for p in range(n_b)) / max(n_b - 1, 1)
         seen.add(idx)
     counts["total"] = sum(counts[k] for k in ("on_target", "re_read", "out_of_order", "off_target"))
     counts["hops_resolved"] = resolved
@@ -85,6 +117,11 @@ def diagnose(trajs: list[dict], instances: list[Instance]) -> dict:
             "read_out_of_order": r["out_of_order"] / total_reads,
             "wasted_read_steps_per_episode": (r["off_target"] + r["re_read"] + r["out_of_order"]) / n,
             "steps_per_episode": b["steps"] / n,
+            # where the misses land
+            "miss_wrong_section": r["miss_wrong_section"] / max(r["off_target"], 1),
+            "miss_adjacent_of_right_section": r["miss_adjacent"] / max(r["miss_right_section"], 1),
+            "miss_distance": r["miss_distance_sum"] / max(r["miss_right_section"], 1),
+            "miss_distance_if_random": r["miss_distance_chance_sum"] / max(r["miss_right_section"], 1),
         }
     return out
 
@@ -104,6 +141,9 @@ def markdown(rep: dict) -> str:
         ("READ re-read (memory/loop)", lambda b: f"{b['read_re_read']:.3f}"),
         ("READ out of order", lambda b: f"{b['read_out_of_order']:.3f}"),
         ("wasted read steps / episode", lambda b: f"{b['wasted_read_steps_per_episode']:.2f}"),
+        ("miss in the wrong register", lambda b: f"{b['miss_wrong_section']:.3f}"),
+        ("miss adjacent to target", lambda b: f"{b['miss_adjacent_of_right_section']:.3f}"),
+        ("miss distance (vs random)", lambda b: f"{b['miss_distance']:.2f} vs {b['miss_distance_if_random']:.2f}"),
     ]
     lines = ["| metric | " + " | ".join(keys) + " |", "|---|" + "---|" * len(keys)]
     for name, fn in rows:
