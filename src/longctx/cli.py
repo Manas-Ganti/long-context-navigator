@@ -97,12 +97,14 @@ def cmd_build(args):
               "splits": {}, "confound": {}}
     ok = True
     for spec in args.splits:
-        name, source, n = spec.split(":")
+        parts = spec.split(":")
+        name, source, n = parts[0], parts[1], parts[2]
+        hops = [int(h) for h in parts[3].split(",")] if len(parts) > 3 else None
         print(f"[{name}] loading {source} …", file=sys.stderr)
         rows = load_rows(source, hf_id=args.hf_id, limit=args.rows_limit)
         insts, stats = build_split(rows, gen, env, split=name, n=int(n), doc_tokens=args.doc_tokens,
                                    seed_base=args.seed, para_tokens=tuple(args.para_tokens),
-                                   progress=_progress(f"[{name}]"))
+                                   hops=hops, progress=_progress(f"[{name}]"))
         write_jsonl(out / f"{name}.jsonl", insts)
         aud = confound_audit(insts, gen.confound_tolerance)
         report["splits"][name], report["confound"][name] = stats, aud
@@ -286,9 +288,12 @@ def main(argv=None):
     p.add_argument("--substrate", choices=["musique"], default="musique")
     p.add_argument("--hf-id", default="dgslibisey/MuSiQue")
     p.add_argument("--out", default="data/musique")
-    p.add_argument("--splits", nargs="+", default=["train:train:2000", "id_test:validation:300"],
-                   metavar="NAME:SOURCE_SPLIT:N",
-                   help="e.g. train:train:2000 id_test:validation:300")
+    p.add_argument("--splits", nargs="+",
+                   default=["train:train:2000:2,3", "id_test:validation:300:2,3",
+                            "ood_test:validation:200:4"],
+                   metavar="NAME:SOURCE_SPLIT:N[:HOPS]",
+                   help="e.g. train:train:2000:2,3 ood_test:validation:200:4 — rows are "
+                        "interleaved across hop counts, since MuSiQue's files are ordered by them")
     p.add_argument("--doc-tokens", type=int, default=32000)
     p.add_argument("--rows-limit", type=int, default=None, help="cap rows read from the source")
     p.add_argument("--allow-confound", action="store_true",

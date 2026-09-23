@@ -177,3 +177,19 @@ def test_only_the_final_answer_is_excluded_from_filler(rows, gen_cfg, env_cfg):
         holding = [c.idx for c in inst.chunks
                    if normalize_answer(inst.answer) in normalize_answer(c.text)]
         assert holding == [inst.answer_chunk]
+
+
+def test_stratify_interleaves_hop_counts():
+    """MuSiQue files are ordered by hop count; walking them in order built a
+    split that was entirely 2-hop."""
+    from longctx.substrates.musique import stratify
+
+    ordered = ([make_row(s, n_hops=2) for s in range(50)] +
+               [make_row(100 + s, n_hops=3) for s in range(50)] +
+               [make_row(200 + s, n_hops=4) for s in range(50)])
+    first30 = stratify(ordered, None)[:30]
+    counts = {h: sum(1 for r in first30 if len(r["question_decomposition"]) == h)
+              for h in (2, 3, 4)}
+    assert all(c >= 8 for c in counts.values()), counts
+    only4 = stratify(ordered, [4])
+    assert only4 and all(len(r["question_decomposition"]) == 4 for r in only4)

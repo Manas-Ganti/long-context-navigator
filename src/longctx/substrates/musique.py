@@ -468,17 +468,42 @@ def validate_real(inst: Instance, gen: GeneratorConfig, env: EnvConfig) -> list[
     return reasons
 
 
+def stratify(rows: list[dict], hops: list[int] | None, seed: int = 0) -> list[dict]:
+    """Interleave rows by hop count, shuffling within each.
+
+    MuSiQue's files are ordered by hop count, so walking them in order builds a
+    split entirely out of 2-hop questions — which is what happened on the first
+    build, and it silently removed the whole composition-generalisation axis
+    (2,000 train and 300 test instances, every one of them 2-hop).
+    """
+    rng = random.Random(seed)
+    groups: dict[int, list[dict]] = {}
+    for r in rows:
+        h = len(r.get("question_decomposition") or [])
+        if hops and h not in hops:
+            continue
+        groups.setdefault(h, []).append(r)
+    for g in groups.values():
+        rng.shuffle(g)
+    out, order = [], sorted(groups)
+    for i in range(max((len(g) for g in groups.values()), default=0)):
+        for h in order:
+            if i < len(groups[h]):
+                out.append(groups[h][i])
+    return out
+
+
 def build_split(rows: list[dict], gen: GeneratorConfig, env: EnvConfig, *, split: str,
                 n: int, doc_tokens: int, seed_base: int = 0, tokenizer: Tokenizer | None = None,
                 pool: TopicalPool | None = None, para_tokens: tuple[int, int] = (40, 260),
-                progress=None) -> tuple[list[Instance], dict]:
+                hops: list[int] | None = None, progress=None) -> tuple[list[Instance], dict]:
     pool = pool or TopicalPool(filler_pool(rows))
     builder = MusiqueBuilder(gen, env, pool, tokenizer, para_tokens=para_tokens)
     out: list[Instance] = []
     skipped: Counter = Counter()
     rejected: Counter = Counter()
     consumed = 0
-    for row in rows:
+    for row in stratify(rows, hops, seed_base):
         if len(out) >= n:
             break
         consumed += 1
@@ -498,6 +523,7 @@ def build_split(rows: list[dict], gen: GeneratorConfig, env: EnvConfig, *, split
     stats = {
         "split": split, "substrate": "musique", "n": len(out), "rows_consumed": consumed,
         "topical_fallbacks": builder.fallbacks, "para_tokens": list(para_tokens),
+        "hops_requested": hops,
         "skipped": dict(skipped), "rejected_by_validation": dict(rejected),
         "rejection_rate": sum(rejected.values()) / max(consumed, 1),
         "n_hops": dict(Counter(x.n_hops for x in out)),
