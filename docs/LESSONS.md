@@ -302,13 +302,26 @@ contain no evidence. Then draw the remaining filler from the paragraphs most
 similar to this question (an inverted index over content words, built once),
 rather than uniformly. Overlap AUC fell to 0.500.
 
+**Then it failed twice more, for a related reason.** Topical filler dropped
+overlap to 0.754, but `n_entries` rose to 0.671 and `length` to 0.563: I was
+*seeding* evidence chunks with a supporting paragraph and padding them from the
+row's own (shorter) distractors, while filler chunks were built from the pool.
+Two construction procedures, so the procedure itself became the label. The fix
+was to have one: pour the hops, the row's own distractors and the topical filler
+into a single shuffled list and group every chunk identically, with the sole
+constraint that two supporting paragraphs never co-occur (enforced by
+reshuffling, so placement stays unbiased). All AUCs then sat within 0.5 ± 0.06.
+
 **How to spot it elsewhere.** Whenever you synthesise the *context* around real
 examples — padding for long-context, adding negatives for retrieval, building
-distractor sets — ask what distinguishes the real part from the padding besides
-the property you intend to test. Sampling negatives uniformly from a large pool
-almost always makes them too easy, because the positive is the only item drawn
-from a different distribution. Check it with the same cheap AUC: if a surface
-feature separates evidence from padding, the padding is doing the labelling.
+distractor sets — two questions catch most of it. First, what distinguishes the
+real part from the padding besides the property you intend to test? Sampling
+negatives uniformly from a large pool almost always makes them too easy, because
+the positive is the only item drawn from a different distribution. Second, is
+the positive *constructed* differently from the negatives — different seeding,
+different padding, different length distribution? If so, the construction is the
+label, whatever the content says. Both are caught by the same cheap AUC sweep
+over surface features, and both are invisible without it.
 
 ---
 

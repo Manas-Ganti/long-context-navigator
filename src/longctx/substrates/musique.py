@@ -143,6 +143,7 @@ class MusiqueBuilder:
         self.env = env
         self.topical = pool if isinstance(pool, TopicalPool) else TopicalPool(pool)
         self.pool = self.topical.paras
+        self.fallbacks = 0          # rows whose topical retrieval had to be topped up
         self.tok = tokenizer or get_tokenizer(env.tokenizer)
 
     def size(self, paras: list[dict]) -> int:
@@ -150,41 +151,47 @@ class MusiqueBuilder:
         chunk ends up over the ceiling after the fact."""
         return self.tok.count(render_chunk(paras)[1])
 
-    def _fill(self, seed: list[dict], fillers: list[dict], rng: random.Random,
-              prefer: list[dict] | None = None) -> list[dict] | None:
-        """Grow `seed` until the rendered chunk lands inside the configured size
-        band. `prefer` is consumed first — that is where this row's OWN
-        distractor paragraphs go.
+    def _group(self, items: list[tuple[dict, bool]], rng: random.Random) -> list[list[tuple[dict, bool]]] | None:
+        """Group a shuffled paragraph list into chunks — ONE procedure for every
+        chunk, so nothing about how a chunk was built can mark it.
 
-        Why it matters: MuSiQue ships ~17 hard distractors selected FOR this
-        question. A first version mixed them into a pool of ~100k paragraphs
-        from other questions and sampled uniformly, so every chunk but the
-        evidence ones was off-topic and question-overlap located the answer
-        chunk with AUC 0.811 — the single-chunk shortcut this environment
-        exists to exclude. On-topic padding is what makes overlap uninformative.
+        Two earlier layouts failed the generation-time audit for exactly this
+        reason: evidence chunks were seeded with a supporting paragraph and
+        padded from the row's own (shorter) distractors while filler chunks were
+        built from the pool, which showed up as n_entries AUC 0.67 and length
+        0.56. The only constraint kept here is that two supporting paragraphs
+        never share a chunk; everything else is identical.
         """
-        paras = list(seed)
-        total = self.size(paras)
-        if total > self.gen.chunk_max_tokens:
-            return None
-        queue = list(prefer or [])
-        rng.shuffle(queue)
+        chunks, cur = [], []
         target = rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
-        for _ in range(200):
-            if total >= target:
-                break
-            cand = queue.pop(0) if queue else rng.choice(fillers)
-            grown = self.size(paras + [cand])
+        for para, sup in items:
+            if sup and any(s for _, s in cur):
+                return None                       # collision; caller reshuffles
+            grown = self.size([p for p, _ in cur] + [para])
             if grown > self.gen.chunk_max_tokens:
-                if queue:
+                if self.size([p for p, _ in cur]) >= self.gen.chunk_min_tokens:
+                    chunks.append(cur)
+                    cur, target = [], rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
+                    if sup or self.size([para]) <= self.gen.chunk_max_tokens:
+                        cur = [(para, sup)]
                     continue
-                break
-            paras.append(cand)
-            total = grown
-        if not (self.gen.chunk_min_tokens <= total <= self.gen.chunk_max_tokens):
-            return None
-        rng.shuffle(paras)          # the supporting paragraph is not always first
-        return paras
+                if sup:
+                    return None                   # cannot place this hop here
+                continue                          # drop an unplaceable filler
+            cur.append((para, sup))
+            if grown >= target:
+                chunks.append(cur)
+                cur, target = [], rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
+        if cur and self.size([p for p, _ in cur]) >= self.gen.chunk_min_tokens:
+            chunks.append(cur)
+        elif any(s for _, s in cur):
+            return None                           # a hop landed in an undersized tail
+        return chunks
+
+    @staticmethod
+    def _mentions(para: dict, needles: set[str]) -> bool:
+        body = normalize_answer(para["title"] + " " + para["text"])
+        return any(w in body for w in needles)
 
     def build(self, row: dict, doc_tokens: int, seed: int, split: str) -> Instance:
         rng = random.Random(seed)
@@ -195,108 +202,96 @@ class MusiqueBuilder:
         paras = {p["idx"]: p for p in row["paragraphs"]}
         answer = row["answer"]
         aliases = [a for a in (row.get("answer_aliases") or []) if a]
-
-        own = [{"title": p["title"], "text": p["paragraph_text"]}
-               for p in row["paragraphs"] if not p.get("is_supporting")]
-        if len(self.pool) < 50:
-            raise Skip("filler pool too small")
-        # Filler is drawn from the paragraphs most similar to THIS question, so
-        # that question-overlap does not mark the evidence (see TopicalPool).
-        fill = self.topical.similar(row["question"] + " " +
-                                    " ".join(h["question"] for h in hops))
-        if len(fill) < 60:
-            fill = self.pool
-
-        # -- share this row's own (on-topic) distractors between the evidence
-        #    chunks and an equal number of decoy chunks, so "reads like the
-        #    question" marks a chunk as on-topic, never as evidence ---------- #
         support_idx = [h["paragraph_support_idx"] for h in hops]
         if len(set(support_idx)) != n_hops:
             raise Skip("two hops share a supporting paragraph")
-        n_decoy = max(n_hops, 2)
-        rng.shuffle(own)
-        groups: list[list[dict]] = [[] for _ in range(n_hops + n_decoy)]
-        for j, p in enumerate(own):
-            groups[j % len(groups)].append(p)
-        if min(len(g) for g in groups) == 0:
-            raise Skip("too few on-topic distractors to pad with")
 
-        chunks_paras: list[list[dict]] = []          # index 0..n_hops-1 are the evidence chunks
-        for hop, i in enumerate(support_idx):
-            sp = paras[i]
-            got = self._fill([{"title": sp["title"], "text": sp["paragraph_text"]}],
-                             fill, rng, prefer=groups[hop])
-            if got is None:
-                raise Skip("supporting paragraph does not fit a chunk")
-            chunks_paras.append(got)
-        decoys = []
-        for d in range(n_decoy):
-            g = groups[n_hops + d]
-            got = self._fill([g[0]], fill, rng, prefer=g[1:])
-            if got is not None:
-                decoys.append(got)
-        if len(decoys) < min(n_decoy, 2):
-            raise Skip("could not build on-topic decoy chunks")
-        chunks_paras.extend(decoys)
+        # Nothing outside the final supporting paragraph may state the answer,
+        # and nothing outside hop i's paragraph may state hop i's answer.
+        needles = {w for w in ({normalize_answer(answer)} |
+                               {normalize_answer(h["answer"]) for h in hops}) if len(w) >= 4}
 
-        # -- the rest is off-topic filler, up to the target document size ---- #
-        avg = (self.gen.chunk_min_tokens + self.gen.chunk_max_tokens) / 2
-        want = max(int(round(doc_tokens / avg)), n_hops + n_decoy + 4)
-        guard = 0
-        while len(chunks_paras) < want and guard < want * 20:
-            guard += 1
-            got = self._fill([rng.choice(fill)], fill, rng)
-            if got is not None:
-                chunks_paras.append(got)
-        if len(chunks_paras) < want * 0.8:
-            raise Skip("could not reach the target document size")
+        own = [{"title": p["title"], "text": p["paragraph_text"]}
+               for p in row["paragraphs"] if not p.get("is_supporting")]
+        own = [p for p in own if not self._mentions(p, needles)]
+        question_text = row["question"] + " " + " ".join(h["question"] for h in hops)
+        fill = [p for p in self.topical.similar(question_text, k=1200)
+                if not self._mentions(p, needles)]
+        if len(fill) < 400:
+            # Short or unusual questions retrieve few neighbours; top up at
+            # random rather than skip the row. Reported per split so a substrate
+            # that falls back constantly is visible rather than silent.
+            seen = {(p["title"], p["text"][:60]) for p in fill}
+            extra = [p for p in self.pool
+                     if (p["title"], p["text"][:60]) not in seen and not self._mentions(p, needles)]
+            rng.shuffle(extra)
+            self.fallbacks += 1
+            fill = fill + extra[: 400 - len(fill)]
+        if len(fill) < 40:
+            raise Skip("too little filler available")
 
-        # -- no filler chunk may contain the answer or an intermediate answer,
-        #    which a borrowed paragraph can do by coincidence ---------------- #
-        wanted = {w for w in ({normalize_answer(answer)} |
-                              {normalize_answer(h["answer"]) for h in hops}) if len(w) >= 4}
-        keep = list(range(n_hops))          # evidence chunks are never dropped
-        for j in range(n_hops, len(chunks_paras)):
-            body = normalize_answer(" ".join(p["text"] for p in chunks_paras[j]))
-            if not any(w in body for w in wanted):
-                keep.append(j)
-        chunks_paras = [chunks_paras[j] for j in keep]
-        if len(chunks_paras) < want * 0.8:
-            raise Skip("too few filler chunks survived the answer-leak filter")
+        # One paragraph list: the hops, this row's own distractors, and enough
+        # question-similar filler to reach the target size. Everything below
+        # treats them identically.
+        items: list[tuple[dict, bool]] = [({"title": paras[i]["title"],
+                                            "text": paras[i]["paragraph_text"]}, True)
+                                          for i in support_idx]
+        items += [(p, False) for p in own]
+        est = sum(self.size([p]) for p, _ in items)
+        j = 0
+        while est < doc_tokens and j < len(fill):
+            items.append((fill[j], False))
+            est += self.size([fill[j]])
+            j += 1
+        if est < doc_tokens * 0.8:
+            raise Skip("not enough filler to reach the target document size")
 
-        # -- shuffle until the separation constraint holds. Rejection sampling,
-        #    so placement stays uniform conditional on validity -------------- #
-        sizes_by_chunk = [self.size(c) for c in chunks_paras]
-        for _ in range(80):
-            order = list(range(len(chunks_paras)))
-            rng.shuffle(order)
-            position = {src: pos for pos, src in enumerate(order)}
+        for _ in range(40):
+            rng.shuffle(items)
+            grouped = self._group(items, rng)
+            if grouped is None:
+                continue
+            if sum(1 for c in grouped for _, sup in c if sup) != n_hops:
+                continue
+            sizes = [self.size([p for p, _ in c]) for c in grouped]
             offsets, off = [], 0
-            for src in order:
+            for n in sizes:
                 offsets.append(off)
-                off += sizes_by_chunk[src]
-            ev_offsets = [offsets[position[h]] for h in range(n_hops)]
+                off += n
+            pos_of_evidence = []
+            ok = True
+            for hop, i in enumerate(support_idx):
+                title, text = paras[i]["title"], paras[i]["paragraph_text"]
+                found = [k for k, c in enumerate(grouped)
+                         if any(sup and p["title"] == title and p["text"] == text for p, sup in c)]
+                if len(found) != 1:
+                    ok = False
+                    break
+                pos_of_evidence.append(found[0])
+            if not ok:
+                continue
+            ev_off = [offsets[k] for k in pos_of_evidence]
             if all(abs(a - b) >= self.gen.min_separation
-                   for i, a in enumerate(ev_offsets) for b in ev_offsets[i + 1:]):
+                   for x, a in enumerate(ev_off) for b in ev_off[x + 1:]):
                 break
         else:
-            raise Skip("cannot separate the required facts")
-        pos_of_evidence = [position[h] for h in range(n_hops)]
+            raise Skip("cannot lay out with the required separation")
 
-        chunks, evidence = [], []
-        for pos, src in enumerate(order):
-            header, text = render_chunk(chunks_paras[src])
+        chunks = []
+        for pos, group in enumerate(grouped):
+            group_paras = [p for p, _ in group]
+            header, text = render_chunk(group_paras)
             chunks.append(Chunk(idx=pos, section="Documents", header=header, kind="register",
-                                text=text, tokens=sizes_by_chunk[src],
-                                entity_names=[p["title"] for p in chunks_paras[src]]))
+                                text=text, tokens=sizes[pos],
+                                entity_names=[p["title"] for p in group_paras]))
+        evidence = []
         for hop, h in enumerate(hops):
             pos = pos_of_evidence[hop]
-            sp = paras[h["paragraph_support_idx"]]
             evidence.append(Evidence(hop=hop, chunk_idx=pos, entity_type="paragraph",
-                                     entity=sp["title"], field=h["question"], value=h["answer"],
+                                     entity=paras[h["paragraph_support_idx"]]["title"],
+                                     field=h["question"], value=h["answer"],
                                      token_offset=offsets[pos]))
 
-        # -- distractors ------------------------------------------------------ #
         distractors = []
         for hop, h in enumerate(hops[:-1]):
             distractors.append(Distractor(kind="intermediate_answer", hop=hop,
@@ -308,7 +303,7 @@ class MusiqueBuilder:
                 distractors.append(Distractor(kind="dataset_distractor", hop=-1, chunk_idx=-1,
                                               entity=p["title"], value=p["title"], wrong_answer=None))
 
-        ev_tokens = [chunks[p].tokens for p in pos_of_evidence]
+        ev_tokens = [chunks[k].tokens for k in pos_of_evidence]
         min_steps, comp_required, solvable = min_step_schedule(
             ev_tokens, self.env.context_ceiling, self.env.assumed_summary_tokens)
         if not solvable:
@@ -397,6 +392,7 @@ def build_split(rows: list[dict], gen: GeneratorConfig, env: EnvConfig, *, split
             progress(len(out), n)
     stats = {
         "split": split, "substrate": "musique", "n": len(out), "rows_consumed": consumed,
+        "topical_fallbacks": builder.fallbacks,
         "skipped": dict(skipped), "rejected_by_validation": dict(rejected),
         "rejection_rate": sum(rejected.values()) / max(consumed, 1),
         "n_hops": dict(Counter(x.n_hops for x in out)),
