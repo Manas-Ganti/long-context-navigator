@@ -223,6 +223,12 @@ def main(argv=None):
     ap.add_argument("--clip-eps", type=float, default=None)
     ap.add_argument("--train-max-hops", type=int, default=None)
     ap.add_argument("--curriculum", action="store_true")
+    ap.add_argument("--kl-stop", type=float, default=0.5, metavar="KL",
+                    help="abort if the rollout KL to the reference exceeds this for --kl-stop-patience "
+                         "consecutive steps. At lr 3e-5 the KL went 0.15 -> 0.51 -> 3.50 over ~20 steps "
+                         "and the policy stopped emitting valid actions; the last usable snapshot was "
+                         "~30 steps earlier. 0 disables.")
+    ap.add_argument("--kl-stop-patience", type=int, default=3)
     ap.add_argument("--micro-batch", type=int, default=2, help="sequences per forward pass")
     ap.add_argument("--rollout-batch", type=int, default=32, help="episodes advanced per generate call")
     ap.add_argument("--save-every", type=int, default=None)
@@ -313,6 +319,7 @@ def main(argv=None):
                        temperature=cfg.generation.temperature, top_p=cfg.generation.top_p, name="grpo-policy")
     cur_hops = curriculum.start_hops if curriculum.enabled else train_max_hops
     success_window: deque = deque(maxlen=curriculum.window)
+    kl_over = 0
     t0 = time.time()
 
     for step in range(start_step, max_steps):
@@ -380,6 +387,21 @@ def main(argv=None):
             cur_hops += 1
             success_window.clear()
             common.rank0_print(f"curriculum: escalating to n_hops <= {cur_hops}")
+
+        # Guardrail: a policy that has run away from the reference is not
+        # recoverable by training longer, and every further step overwrites a
+        # good snapshot with a worse one.
+        if args.kl_stop and metrics["train/kl"] > args.kl_stop:
+            kl_over += 1
+            common.rank0_print(f"WARNING kl={metrics['train/kl']:.3f} > --kl-stop {args.kl_stop} "
+                               f"({kl_over}/{args.kl_stop_patience})")
+        else:
+            kl_over = 0
+        if args.kl_stop and kl_over >= args.kl_stop_patience:
+            common.rank0_print(f"ABORTING at step {step}: KL exceeded {args.kl_stop} for "
+                               f"{kl_over} consecutive steps. The last snapshot under the "
+                               f"threshold is the policy to use.")
+            break
 
         if (step + 1) % save_every == 0 or step + 1 == max_steps:
             accelerator.wait_for_everyone()
