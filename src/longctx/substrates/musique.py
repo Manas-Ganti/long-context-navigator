@@ -82,6 +82,48 @@ def filler_pool(rows: list[dict]) -> list[dict]:
     return pool
 
 
+class TopicalPool:
+    """Filler paragraphs, retrievable by similarity to a question.
+
+    Padding a 2k-token MuSiQue instance out to 32k with paragraphs drawn at
+    random from unrelated questions leaves the evidence as the only text that
+    shares vocabulary with the question: measured question-overlap located the
+    answer chunk with AUC 0.811, which is the single-chunk shortcut the
+    environment exists to exclude. Padding with the MOST question-similar
+    paragraphs available instead makes overlap uninformative by construction.
+
+    An inverted index over content words, built once; retrieval is a counter
+    over the question's words.
+    """
+
+    def __init__(self, paragraphs: list[dict], max_postings: int = 4000):
+        self.paras = paragraphs
+        self.index: dict[str, list[int]] = {}
+        for i, p in enumerate(paragraphs):
+            for w in _content_words(p["title"] + " " + p["text"]):
+                postings = self.index.setdefault(w, [])
+                if len(postings) < max_postings:
+                    postings.append(i)
+
+    def similar(self, question: str, k: int = 600) -> list[dict]:
+        counts: Counter = Counter()
+        for w in _content_words(question):
+            for i in self.index.get(w, ()):
+                counts[i] += 1
+        return [self.paras[i] for i, _ in counts.most_common(k)]
+
+
+_WORD = re.compile(r"[A-Za-z][A-Za-z\-]{2,}")
+_STOP = frozenset("""the of a an is was were are be been being what which who whom whose when where
+why how to in on at by for from and or with that this these those it its他 his her their they them
+he she we you i as but if then than there here also not no yes do does did done has have had
+""".split())
+
+
+def _content_words(text: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(text) if w.lower() not in _STOP}
+
+
 # --------------------------------------------------------------------------- #
 # Layout
 # --------------------------------------------------------------------------- #
@@ -95,11 +137,12 @@ def render_chunk(paras: list[dict]) -> tuple[str, str]:
 
 
 class MusiqueBuilder:
-    def __init__(self, gen: GeneratorConfig, env: EnvConfig, pool: list[dict],
+    def __init__(self, gen: GeneratorConfig, env: EnvConfig, pool: list[dict] | TopicalPool,
                  tokenizer: Tokenizer | None = None):
         self.gen = gen
         self.env = env
-        self.pool = pool
+        self.topical = pool if isinstance(pool, TopicalPool) else TopicalPool(pool)
+        self.pool = self.topical.paras
         self.tok = tokenizer or get_tokenizer(env.tokenizer)
 
     def size(self, paras: list[dict]) -> int:
@@ -107,21 +150,35 @@ class MusiqueBuilder:
         chunk ends up over the ceiling after the fact."""
         return self.tok.count(render_chunk(paras)[1])
 
-    def _fill(self, seed: list[dict], fillers: list[dict], rng: random.Random) -> list[dict] | None:
-        """Grow `seed` with paragraphs until the rendered chunk lands inside the
-        configured size band. Returns None if it cannot."""
+    def _fill(self, seed: list[dict], fillers: list[dict], rng: random.Random,
+              prefer: list[dict] | None = None) -> list[dict] | None:
+        """Grow `seed` until the rendered chunk lands inside the configured size
+        band. `prefer` is consumed first — that is where this row's OWN
+        distractor paragraphs go.
+
+        Why it matters: MuSiQue ships ~17 hard distractors selected FOR this
+        question. A first version mixed them into a pool of ~100k paragraphs
+        from other questions and sampled uniformly, so every chunk but the
+        evidence ones was off-topic and question-overlap located the answer
+        chunk with AUC 0.811 — the single-chunk shortcut this environment
+        exists to exclude. On-topic padding is what makes overlap uninformative.
+        """
         paras = list(seed)
         total = self.size(paras)
         if total > self.gen.chunk_max_tokens:
             return None
+        queue = list(prefer or [])
+        rng.shuffle(queue)
         target = rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
         for _ in range(200):
             if total >= target:
                 break
-            cand = rng.choice(fillers)
+            cand = queue.pop(0) if queue else rng.choice(fillers)
             grown = self.size(paras + [cand])
             if grown > self.gen.chunk_max_tokens:
-                continue
+                if queue:
+                    continue
+                break
             paras.append(cand)
             total = grown
         if not (self.gen.chunk_min_tokens <= total <= self.gen.chunk_max_tokens):
@@ -139,31 +196,56 @@ class MusiqueBuilder:
         answer = row["answer"]
         aliases = [a for a in (row.get("answer_aliases") or []) if a]
 
-        own_fillers = [{"title": p["title"], "text": p["paragraph_text"]}
-                       for p in row["paragraphs"] if not p.get("is_supporting")]
-        fillers = own_fillers + self.pool
-        if len(fillers) < 20:
+        own = [{"title": p["title"], "text": p["paragraph_text"]}
+               for p in row["paragraphs"] if not p.get("is_supporting")]
+        if len(self.pool) < 50:
             raise Skip("filler pool too small")
+        # Filler is drawn from the paragraphs most similar to THIS question, so
+        # that question-overlap does not mark the evidence (see TopicalPool).
+        fill = self.topical.similar(row["question"] + " " +
+                                    " ".join(h["question"] for h in hops))
+        if len(fill) < 60:
+            fill = self.pool
 
-        # -- evidence chunks: one supporting paragraph each ------------------ #
+        # -- share this row's own (on-topic) distractors between the evidence
+        #    chunks and an equal number of decoy chunks, so "reads like the
+        #    question" marks a chunk as on-topic, never as evidence ---------- #
         support_idx = [h["paragraph_support_idx"] for h in hops]
         if len(set(support_idx)) != n_hops:
             raise Skip("two hops share a supporting paragraph")
+        n_decoy = max(n_hops, 2)
+        rng.shuffle(own)
+        groups: list[list[dict]] = [[] for _ in range(n_hops + n_decoy)]
+        for j, p in enumerate(own):
+            groups[j % len(groups)].append(p)
+        if min(len(g) for g in groups) == 0:
+            raise Skip("too few on-topic distractors to pad with")
+
         chunks_paras: list[list[dict]] = []          # index 0..n_hops-1 are the evidence chunks
-        for i in support_idx:
+        for hop, i in enumerate(support_idx):
             sp = paras[i]
-            got = self._fill([{"title": sp["title"], "text": sp["paragraph_text"]}], fillers, rng)
+            got = self._fill([{"title": sp["title"], "text": sp["paragraph_text"]}],
+                             fill, rng, prefer=groups[hop])
             if got is None:
                 raise Skip("supporting paragraph does not fit a chunk")
             chunks_paras.append(got)
+        decoys = []
+        for d in range(n_decoy):
+            g = groups[n_hops + d]
+            got = self._fill([g[0]], fill, rng, prefer=g[1:])
+            if got is not None:
+                decoys.append(got)
+        if len(decoys) < min(n_decoy, 2):
+            raise Skip("could not build on-topic decoy chunks")
+        chunks_paras.extend(decoys)
 
-        # -- filler chunks up to the target document size -------------------- #
+        # -- the rest is off-topic filler, up to the target document size ---- #
         avg = (self.gen.chunk_min_tokens + self.gen.chunk_max_tokens) / 2
-        want = max(int(round(doc_tokens / avg)), n_hops + 4)
+        want = max(int(round(doc_tokens / avg)), n_hops + n_decoy + 4)
         guard = 0
         while len(chunks_paras) < want and guard < want * 20:
             guard += 1
-            got = self._fill([rng.choice(fillers)], fillers, rng)
+            got = self._fill([rng.choice(fill)], fill, rng)
             if got is not None:
                 chunks_paras.append(got)
         if len(chunks_paras) < want * 0.8:
@@ -173,7 +255,7 @@ class MusiqueBuilder:
         #    which a borrowed paragraph can do by coincidence ---------------- #
         wanted = {w for w in ({normalize_answer(answer)} |
                               {normalize_answer(h["answer"]) for h in hops}) if len(w) >= 4}
-        keep = list(range(n_hops))
+        keep = list(range(n_hops))          # evidence chunks are never dropped
         for j in range(n_hops, len(chunks_paras)):
             body = normalize_answer(" ".join(p["text"] for p in chunks_paras[j]))
             if not any(w in body for w in wanted):
@@ -289,8 +371,8 @@ def validate_real(inst: Instance, gen: GeneratorConfig, env: EnvConfig) -> list[
 
 def build_split(rows: list[dict], gen: GeneratorConfig, env: EnvConfig, *, split: str,
                 n: int, doc_tokens: int, seed_base: int = 0, tokenizer: Tokenizer | None = None,
-                progress=None) -> tuple[list[Instance], dict]:
-    pool = filler_pool(rows)
+                pool: TopicalPool | None = None, progress=None) -> tuple[list[Instance], dict]:
+    pool = pool or TopicalPool(filler_pool(rows))
     builder = MusiqueBuilder(gen, env, pool, tokenizer)
     out: list[Instance] = []
     skipped: Counter = Counter()

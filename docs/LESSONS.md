@@ -282,6 +282,36 @@ and it is the only thing that answers the question.
 
 ---
 
+## 12. Padding a short instance out to long context made the evidence lexically obvious
+
+**Symptom.** The first MuSiQue build was blocked by the generation-time audit:
+`answer_within_section_multihop: overlap = 0.811`. Word overlap with the
+question located the answer chunk four times out of five.
+
+**What it actually was.** A MuSiQue instance is ~2k tokens; this environment
+needs 32k. I padded with paragraphs sampled uniformly from a ~100k pool drawn
+from *other* questions — so every filler chunk was off-topic, and the evidence
+chunks were the only text in the document sharing vocabulary with the question.
+The dataset's own ~17 hard distractors, selected specifically for that question,
+were in the pool too, but at 17-in-100k they were never sampled. I had diluted
+the one thing that made the task hard.
+
+**Fix.** Two changes. Use the row's own distractors deliberately — to pad the
+evidence chunks *and* to build an equal number of on-topic decoy chunks that
+contain no evidence. Then draw the remaining filler from the paragraphs most
+similar to this question (an inverted index over content words, built once),
+rather than uniformly. Overlap AUC fell to 0.500.
+
+**How to spot it elsewhere.** Whenever you synthesise the *context* around real
+examples — padding for long-context, adding negatives for retrieval, building
+distractor sets — ask what distinguishes the real part from the padding besides
+the property you intend to test. Sampling negatives uniformly from a large pool
+almost always makes them too easy, because the positive is the only item drawn
+from a different distribution. Check it with the same cheap AUC: if a surface
+feature separates evidence from padding, the padding is doing the labelling.
+
+---
+
 ## The pattern across all of them
 
 - **Zero or suspiciously round numbers are harness problems until proven
