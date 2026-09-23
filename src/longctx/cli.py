@@ -101,7 +101,8 @@ def cmd_build(args):
         print(f"[{name}] loading {source} …", file=sys.stderr)
         rows = load_rows(source, hf_id=args.hf_id, limit=args.rows_limit)
         insts, stats = build_split(rows, gen, env, split=name, n=int(n), doc_tokens=args.doc_tokens,
-                                   seed_base=args.seed, progress=_progress(f"[{name}]"))
+                                   seed_base=args.seed, para_tokens=tuple(args.para_tokens),
+                                   progress=_progress(f"[{name}]"))
         write_jsonl(out / f"{name}.jsonl", insts)
         aud = confound_audit(insts, gen.confound_tolerance)
         report["splits"][name], report["confound"][name] = stats, aud
@@ -280,6 +281,9 @@ def main(argv=None):
                    help="e.g. train:train:2000 id_test:validation:300")
     p.add_argument("--doc-tokens", type=int, default=32000)
     p.add_argument("--rows-limit", type=int, default=None, help="cap rows read from the source")
+    p.add_argument("--para-tokens", type=int, nargs=2, default=[40, 260], metavar=("MIN", "MAX"),
+                   help="outer sanity bound on paragraph length; within it, filler is "
+                        "length-matched to each row's own supporting paragraphs")
     p.set_defaults(fn=cmd_build)
 
     p = sub.add_parser("inspect", help="render a dataset as one readable Markdown document")

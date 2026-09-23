@@ -138,54 +138,114 @@ def render_chunk(paras: list[dict]) -> tuple[str, str]:
 
 class MusiqueBuilder:
     def __init__(self, gen: GeneratorConfig, env: EnvConfig, pool: list[dict] | TopicalPool,
-                 tokenizer: Tokenizer | None = None):
+                 tokenizer: Tokenizer | None = None,
+                 para_tokens: tuple[int, int] = (40, 260)):
         self.gen = gen
         self.env = env
+        # Filler paragraphs are length-matched to THIS ROW's supporting ones.
+        #
+        # MuSiQue's supporting paragraphs are shorter than the pool average, so
+        # a chunk holding one needed MORE paragraphs to reach the size band:
+        # n_entries AUC 0.587, and with more paragraphs came more distinct
+        # vocabulary and a residual question-overlap signal (0.628). A single
+        # global band does not fix it — it truncates both distributions but
+        # leaves the supporting paragraphs at the short end of it (n_entries
+        # rose to 0.73). Matching per document does: every paragraph in a
+        # document is then drawn from the same narrow length window, so how
+        # many fit in a chunk cannot depend on which kind it is.
+        #
+        # `para_tokens` stays as an outer sanity bound: a supporting paragraph
+        # outside it could not share a chunk with anything.
+        self.para_tokens = para_tokens
+        self.band_slack = 20          # tokens either side of the row's own range
         self.topical = pool if isinstance(pool, TopicalPool) else TopicalPool(pool)
         self.pool = self.topical.paras
         self.fallbacks = 0          # rows whose topical retrieval had to be topped up
         self.tok = tokenizer or get_tokenizer(env.tokenizer)
+        self._psize: dict[tuple[str, str], int] = {}
+
+    def in_band(self, para: dict, band: tuple[int, int] | None = None) -> bool:
+        lo, hi = band or self.para_tokens
+        return lo <= self.psize(para) <= hi
+
+    def row_band(self, sup_paras: list[dict]) -> tuple[int, int]:
+        """The length window every paragraph in this document must fall in."""
+        lens = [self.psize(p) for p in sup_paras]
+        return (max(min(lens) - self.band_slack, 10), max(lens) + self.band_slack)
 
     def size(self, paras: list[dict]) -> int:
         """Exact rendered size. Estimating it and rendering separately is how a
         chunk ends up over the ceiling after the fact."""
         return self.tok.count(render_chunk(paras)[1])
 
-    def _group(self, items: list[tuple[dict, bool]], rng: random.Random) -> list[list[tuple[dict, bool]]] | None:
-        """Group a shuffled paragraph list into chunks — ONE procedure for every
-        chunk, so nothing about how a chunk was built can mark it.
+    def psize(self, para: dict) -> int:
+        """Cached per-paragraph cost, including its share of the header and the
+        '## ' markers. Layout tries thousands of arrangements per document, so
+        re-rendering a chunk for every trial placement is what made an earlier
+        version quadratic; totals are tracked from these and the exact rendered
+        size is verified once per accepted chunk."""
+        key = (para["title"], para["text"])
+        n = self._psize.get(key)
+        if n is None:
+            n = self.tok.count(para["title"]) * 2 + self.tok.count(para["text"]) + 4
+            self._psize[key] = n
+        return n
 
-        Two earlier layouts failed the generation-time audit for exactly this
-        reason: evidence chunks were seeded with a supporting paragraph and
-        padded from the row's own (shorter) distractors while filler chunks were
-        built from the pool, which showed up as n_entries AUC 0.67 and length
-        0.56. The only constraint kept here is that two supporting paragraphs
-        never share a chunk; everything else is identical.
+    def _group(self, items: list[tuple[dict, bool]], k: int,
+               rng: random.Random) -> list[list[tuple[dict, bool]]] | None:
+        """Assign paragraphs to chunks of exactly `k`, least-loaded chunk first.
+
+        Three surface features could otherwise mark the evidence, and each was
+        measured doing so on real data:
+
+        * how a chunk was BUILT — evidence chunks were once seeded with a
+          supporting paragraph and padded differently (n_entries AUC 0.587);
+          here every chunk is built by this one procedure;
+        * how MANY paragraphs it holds — a fill-to-target rule needed more of
+          them around MuSiQue's shorter supporting paragraphs; `k` is fixed, so
+          the count is constant by construction;
+        * how LONG it is — with `k` fixed, a chunk holding a short supporting
+          paragraph was simply shorter (length AUC 0.182). Placing each
+          paragraph in the currently lightest chunk equalises totals, so size
+          stops depending on contents.
+
+        Supporting paragraphs are placed first, into distinct chunks. Returns
+        None when the result falls outside the chunk band, and the caller
+        reshuffles.
         """
-        chunks, cur = [], []
-        target = rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
-        for para, sup in items:
-            if sup and any(s for _, s in cur):
-                return None                       # collision; caller reshuffles
-            grown = self.size([p for p, _ in cur] + [para])
-            if grown > self.gen.chunk_max_tokens:
-                if self.size([p for p, _ in cur]) >= self.gen.chunk_min_tokens:
-                    chunks.append(cur)
-                    cur, target = [], rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
-                    if sup or self.size([para]) <= self.gen.chunk_max_tokens:
-                        cur = [(para, sup)]
-                    continue
-                if sup:
-                    return None                   # cannot place this hop here
-                continue                          # drop an unplaceable filler
-            cur.append((para, sup))
-            if grown >= target:
-                chunks.append(cur)
-                cur, target = [], rng.randint(self.gen.chunk_min_tokens, self.gen.chunk_max_tokens)
-        if cur and self.size([p for p, _ in cur]) >= self.gen.chunk_min_tokens:
-            chunks.append(cur)
-        elif any(s for _, s in cur):
-            return None                           # a hop landed in an undersized tail
+        n_chunks = len(items) // k
+        if n_chunks < len(items) and any(sup for _, sup in items[n_chunks * k:]):
+            pass                                   # tail is discarded below; hops are placed first
+        if n_chunks < 4:
+            return None
+        chunks: list[list[tuple[dict, bool]]] = [[] for _ in range(n_chunks)]
+        sizes = [0] * n_chunks
+        # Longest-processing-time first: largest paragraphs placed while every
+        # chunk is still empty, smallest placed last into whichever chunk is
+        # lightest — which is what actually equalises totals. Least-loaded over
+        # a random order does not: the deficit left by a short supporting
+        # paragraph survives it (length AUC stayed at 0.18).
+        ordered = sorted(items, key=lambda it: -self.psize(it[0]))
+        placed = 0
+        for para, sup in ordered:
+            if placed >= n_chunks * k:
+                break
+            cand = [i for i in range(n_chunks)
+                    if len(chunks[i]) < k and not (sup and any(s for _, s in chunks[i]))]
+            if not cand:
+                return None
+            lightest = min(sizes[i] for i in cand)
+            pick = rng.choice([i for i in cand if sizes[i] == lightest])
+            chunks[pick].append((para, sup))
+            sizes[pick] += self.psize(para)
+            placed += 1
+        for c in chunks:
+            rng.shuffle(c)                         # size order carries no information inside a chunk
+        if any(len(c) != k for c in chunks):
+            return None
+        if any(not (self.gen.chunk_min_tokens <= self.size([p for p, _ in c]) <= self.gen.chunk_max_tokens)
+               for c in chunks):
+            return None
         return chunks
 
     @staticmethod
@@ -211,19 +271,26 @@ class MusiqueBuilder:
         needles = {w for w in ({normalize_answer(answer)} |
                                {normalize_answer(h["answer"]) for h in hops}) if len(w) >= 4}
 
+        sup_paras = [{"title": paras[i]["title"], "text": paras[i]["paragraph_text"]}
+                     for i in support_idx]
+        if not all(self.in_band(p) for p in sup_paras):
+            raise Skip("supporting paragraph outside the sanity bound")
+        band = self.row_band(sup_paras)
+
         own = [{"title": p["title"], "text": p["paragraph_text"]}
                for p in row["paragraphs"] if not p.get("is_supporting")]
-        own = [p for p in own if not self._mentions(p, needles)]
+        own = [p for p in own if self.in_band(p, band) and not self._mentions(p, needles)]
         question_text = row["question"] + " " + " ".join(h["question"] for h in hops)
-        fill = [p for p in self.topical.similar(question_text, k=1200)
-                if not self._mentions(p, needles)]
+        fill = [p for p in self.topical.similar(question_text, k=6000)
+                if self.in_band(p, band) and not self._mentions(p, needles)]
         if len(fill) < 400:
             # Short or unusual questions retrieve few neighbours; top up at
             # random rather than skip the row. Reported per split so a substrate
             # that falls back constantly is visible rather than silent.
             seen = {(p["title"], p["text"][:60]) for p in fill}
             extra = [p for p in self.pool
-                     if (p["title"], p["text"][:60]) not in seen and not self._mentions(p, needles)]
+                     if (p["title"], p["text"][:60]) not in seen
+                     and self.in_band(p, band) and not self._mentions(p, needles)]
             rng.shuffle(extra)
             self.fallbacks += 1
             fill = fill + extra[: 400 - len(fill)]
@@ -233,49 +300,64 @@ class MusiqueBuilder:
         # One paragraph list: the hops, this row's own distractors, and enough
         # question-similar filler to reach the target size. Everything below
         # treats them identically.
-        items: list[tuple[dict, bool]] = [({"title": paras[i]["title"],
-                                            "text": paras[i]["paragraph_text"]}, True)
-                                          for i in support_idx]
+        items: list[tuple[dict, bool]] = [(p, True) for p in sup_paras]
         items += [(p, False) for p in own]
-        est = sum(self.size([p]) for p, _ in items)
+        est = sum(self.psize(p) for p, _ in items)
         j = 0
         while est < doc_tokens and j < len(fill):
             items.append((fill[j], False))
-            est += self.size([fill[j]])
+            est += self.psize(fill[j])
             j += 1
         if est < doc_tokens * 0.8:
             raise Skip("not enough filler to reach the target document size")
 
-        for _ in range(40):
+        # Paragraphs per chunk, from the document's own median paragraph length.
+        median = sorted(self.psize(p) for p, _ in items)[len(items) // 2]
+        k = max(2, round(((self.gen.chunk_min_tokens + self.gen.chunk_max_tokens) / 2) / max(median, 1)))
+        if not (self.gen.chunk_min_tokens <= k * median <= self.gen.chunk_max_tokens):
+            raise Skip("no paragraph count fits the chunk band for this document")
+
+        # Assemble once (the expensive part), then search chunk ORDERS for one
+        # that satisfies the separation constraint — reordering is free, and
+        # redoing the whole assignment for every attempt was what made most
+        # rows fail to lay out at all.
+        grouped = None
+        for _ in range(8):
             rng.shuffle(items)
-            grouped = self._group(items, rng)
-            if grouped is None:
-                continue
-            if sum(1 for c in grouped for _, sup in c if sup) != n_hops:
-                continue
-            sizes = [self.size([p for p, _ in c]) for c in grouped]
+            grouped = self._group(items, k, rng)
+            if grouped is not None and sum(1 for c in grouped for _, sup in c if sup) == n_hops:
+                break
+            grouped = None
+        if grouped is None:
+            raise Skip("cannot assign paragraphs to chunks in this size band")
+
+        by_chunk = {}
+        for ci, c in enumerate(grouped):
+            for p, sup in c:
+                if sup:
+                    by_chunk[(p["title"], p["text"])] = ci
+        support_keys = [(paras[i]["title"], paras[i]["paragraph_text"]) for i in support_idx]
+        if any(key not in by_chunk for key in support_keys):
+            raise Skip("a hop was dropped during assignment")
+        chunk_sizes = [self.size([p for p, _ in c]) for c in grouped]
+
+        for _ in range(400):
+            order = list(range(len(grouped)))
+            rng.shuffle(order)
+            place = {src: pos for pos, src in enumerate(order)}
             offsets, off = [], 0
-            for n in sizes:
+            for src in order:
                 offsets.append(off)
-                off += n
-            pos_of_evidence = []
-            ok = True
-            for hop, i in enumerate(support_idx):
-                title, text = paras[i]["title"], paras[i]["paragraph_text"]
-                found = [k for k, c in enumerate(grouped)
-                         if any(sup and p["title"] == title and p["text"] == text for p, sup in c)]
-                if len(found) != 1:
-                    ok = False
-                    break
-                pos_of_evidence.append(found[0])
-            if not ok:
-                continue
-            ev_off = [offsets[k] for k in pos_of_evidence]
+                off += chunk_sizes[src]
+            ev_off = [offsets[place[by_chunk[key]]] for key in support_keys]
             if all(abs(a - b) >= self.gen.min_separation
                    for x, a in enumerate(ev_off) for b in ev_off[x + 1:]):
                 break
         else:
             raise Skip("cannot lay out with the required separation")
+        grouped = [grouped[src] for src in order]
+        sizes = [chunk_sizes[src] for src in order]
+        pos_of_evidence = [place[by_chunk[key]] for key in support_keys]
 
         chunks = []
         for pos, group in enumerate(grouped):
@@ -366,9 +448,10 @@ def validate_real(inst: Instance, gen: GeneratorConfig, env: EnvConfig) -> list[
 
 def build_split(rows: list[dict], gen: GeneratorConfig, env: EnvConfig, *, split: str,
                 n: int, doc_tokens: int, seed_base: int = 0, tokenizer: Tokenizer | None = None,
-                pool: TopicalPool | None = None, progress=None) -> tuple[list[Instance], dict]:
+                pool: TopicalPool | None = None, para_tokens: tuple[int, int] = (40, 260),
+                progress=None) -> tuple[list[Instance], dict]:
     pool = pool or TopicalPool(filler_pool(rows))
-    builder = MusiqueBuilder(gen, env, pool, tokenizer)
+    builder = MusiqueBuilder(gen, env, pool, tokenizer, para_tokens=para_tokens)
     out: list[Instance] = []
     skipped: Counter = Counter()
     rejected: Counter = Counter()
@@ -392,7 +475,7 @@ def build_split(rows: list[dict], gen: GeneratorConfig, env: EnvConfig, *, split
             progress(len(out), n)
     stats = {
         "split": split, "substrate": "musique", "n": len(out), "rows_consumed": consumed,
-        "topical_fallbacks": builder.fallbacks,
+        "topical_fallbacks": builder.fallbacks, "para_tokens": list(para_tokens),
         "skipped": dict(skipped), "rejected_by_validation": dict(rejected),
         "rejection_rate": sum(rejected.values()) / max(consumed, 1),
         "n_hops": dict(Counter(x.n_hops for x in out)),

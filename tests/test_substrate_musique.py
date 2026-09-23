@@ -19,11 +19,16 @@ WORDS = ("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu 
 
 
 def _para(rng, idx, title, supporting=False, contains=None):
-    body = " ".join(rng.choice(WORDS) for _ in range(90))
+    """Length does not depend on whether the paragraph is supporting — the fact
+    replaces filler words rather than being appended. A fixture where supporting
+    paragraphs are systematically longer makes the per-document length band
+    exclude the whole pool, which is a property of the fixture, not the code."""
+    n = rng.randint(80, 110)
+    words = [rng.choice(WORDS) for _ in range(n)]
     if contains:
-        body = f"{body} The record states {contains} explicitly. " + \
-               " ".join(rng.choice(WORDS) for _ in range(20))
-    return {"idx": idx, "title": title, "paragraph_text": body, "is_supporting": supporting}
+        words[n // 2:n // 2 + 4] = ["the", "record", "states", contains]
+    return {"idx": idx, "title": title, "paragraph_text": " ".join(words),
+            "is_supporting": supporting}
 
 
 def make_row(seed: int, n_hops: int = 2, n_paras: int = 20) -> dict:
