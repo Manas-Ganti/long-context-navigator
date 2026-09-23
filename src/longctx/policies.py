@@ -61,6 +61,23 @@ def fact_line(inst: Instance, hop: int) -> str:
     return f"{ev.entity}: {ev.field} = {ev.value}"
 
 
+def locate_reasoning(inst: Instance, entity: str, chunk) -> str:
+    """The alphabetical comparison that PICKS this chunk, written out.
+
+    The oracle knows the chunk index because it is privileged; stating it
+    ("the map places it in chunk 27") demonstrates the outcome of navigation
+    without the process, so SFT learns to assert a chunk number it cannot
+    derive. Measured on the SFT policy: 44% of reads land on a chunk that does
+    not hold the entity being sought, at every depth. Everything in this
+    sentence comes from the document map, which is in the observation."""
+    first, last = chunk.entity_names[0], chunk.entity_names[-1]
+    sec = chunk.section
+    if first == last:
+        return f"In the {sec}, chunk {chunk.idx} is the entry for {first}"
+    return (f"In the {sec}, '{entity}' sorts at or after '{first}' and at or before '{last}', "
+            f"which is the range of chunk {chunk.idx}")
+
+
 class OracleNavigator(MechanicalPolicy):
     """Optimal-in-steps schedule: READ the next needed chunk; when it does not
     fit, COMPRESS everything held into the known facts; ANSWER once the last
@@ -98,19 +115,28 @@ class OracleNavigator(MechanicalPolicy):
 
         # optional noise: a plausible detour
         if self.noise_prob and self.rng.random() < self.noise_prob:
-            same_section = [c for c in inst.chunks if c.section == target.section and c.idx != target.idx
-                            and str(c.idx) not in held_ids and c.tokens <= free]
             if redundant and self.rng.random() < 0.5:
                 d = redundant[0]
                 return f"THOUGHT: Chunk {d} is no longer needed; free it.\nACTION: DROP {d}"
-            if same_section:
-                c = self.rng.choice(same_section)
-                return (f"THOUGHT: I need {ev.entity} in {target.section}; chunk {c.idx} ({c.header}) may cover it.\n"
-                        f"ACTION: READ {c.idx}")
+            # A detour must be a PLAUSIBLE mistake — the chunk immediately next to
+            # the right one in the same register — with the uncertainty stated.
+            # A detour to an alphabetically absurd chunk would teach the sloppy
+            # comparison this reasoning exists to prevent.
+            section = [c for c in inst.chunks if c.section == target.section]
+            pos = [c.idx for c in section].index(target.idx)
+            neighbours = [section[p] for p in (pos - 1, pos + 1) if 0 <= p < len(section)]
+            neighbours = [c for c in neighbours if str(c.idx) not in held_ids and c.tokens <= free]
+            if neighbours:
+                c = self.rng.choice(neighbours)
+                return (f"THOUGHT: I need the {ev.field.lower()} of {ev.entity}. In the {target.section} "
+                        f"chunk {c.idx} runs '{c.entity_names[0]}' to '{c.entity_names[-1]}' and chunk "
+                        f"{target.idx} runs '{target.entity_names[0]}' to '{target.entity_names[-1]}'; "
+                        f"the boundary is close, so I check {c.idx} first.\nACTION: READ {c.idx}")
 
         if target.tokens <= free:
-            return (f"THOUGHT: I need the {ev.field.lower()} of {ev.entity}; the map places it in chunk "
-                    f"{target.idx} ({target.header}), which fits.\nACTION: READ {target.idx}")
+            return (f"THOUGHT: I need the {ev.field.lower()} of {ev.entity}. "
+                    f"{locate_reasoning(inst, ev.entity, target)}; it is {target.tokens} tokens and "
+                    f"{free} are free, so it fits.\nACTION: READ {target.idx}")
 
         # does not fit: compress everything held into the facts known so far
         facts = "; ".join(fact_line(inst, h) for h in range(j) if known[h])

@@ -92,3 +92,16 @@ def test_diagnose_separates_search_from_memory(env_cfg, instances):
     assert rep["all"]["wasted_read_steps_per_episode"] == 0.0
     assert rep["all"]["outcomes"]["correct"] == 1.0
     assert rep["all"]["hops_resolved_per_episode"] == rep["all"]["hops_needed_per_episode"]
+
+
+def test_teacher_shows_the_navigation_comparison(env_cfg, instances):
+    """A READ of an evidence chunk must justify itself from the map's ranges,
+    not assert an index. SFT on assertions produced 44% off-target reads."""
+    kept, _ = sample_teacher_trajectories(env_cfg, instances[:10], per_instance=1)
+    reads = [s for t in kept for s in t.steps if s.get("kind") == "READ"]
+    assert reads
+    for s in reads:
+        r = s["response"]
+        assert "sorts at or after" in r or "runs '" in r or "is the entry for" in r, r
+        # and the names it compares against must be visible in that step's prompt
+        assert all(part in s["prompt"] for part in [f"[{s['ids'][0]}]"])

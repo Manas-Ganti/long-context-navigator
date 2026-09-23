@@ -20,6 +20,9 @@ Rules of the working context:
   allowed but costs a step.
 - Entries can carry superseded values ("previously X", "then Y [current ...]").
   Use the CURRENT value. Entities with similar names are different entities.
+- Registers are sorted alphabetically and the map gives each chunk's range. To
+  locate an entry, compare its name against those ranges before reading — a
+  chunk that does not contain it costs a step for nothing.
 
 Actions (exactly one per response, on the last line, prefixed with ACTION:):
   ACTION: READ <chunk id>                       load a chunk
@@ -42,7 +45,7 @@ def render_observation(obs) -> str:
         f"CONTEXT: {obs.used} / {obs.ceiling} tokens used ({free} free). Exceeding {obs.ceiling} ends the episode.",
         f"STEPS: {obs.steps_used} used of {obs.step_budget}.",
         "",
-        "DOCUMENT MAP (id · section · range · tokens):",
+        "DOCUMENT MAP (id · section · first entry – last entry · tokens):",
         render_map(obs),
         "",
         "MEMORY LEDGER:",
