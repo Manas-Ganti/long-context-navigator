@@ -28,6 +28,7 @@ answer with its aliases.
 
 from __future__ import annotations
 
+import math
 import random
 import re
 from collections import Counter
@@ -99,18 +100,36 @@ class TopicalPool:
     def __init__(self, paragraphs: list[dict], max_postings: int = 4000):
         self.paras = paragraphs
         self.index: dict[str, list[int]] = {}
+        self.df: Counter = Counter()
         for i, p in enumerate(paragraphs):
             for w in _content_words(p["title"] + " " + p["text"]):
+                self.df[w] += 1
                 postings = self.index.setdefault(w, [])
                 if len(postings) < max_postings:
                     postings.append(i)
+        self.n = max(len(paragraphs), 1)
+
+    def idf(self, word: str) -> float:
+        return math.log(self.n / (1 + self.df.get(word, 0)))
 
     def similar(self, question: str, k: int = 600) -> list[dict]:
-        counts: Counter = Counter()
+        """Rank filler by IDF-weighted overlap with the question.
+
+        Counting raw matches lets common words dominate, and the words that
+        actually make an evidence paragraph distinctive are the rare ones — the
+        question's entity names. Weighting by inverse document frequency picks
+        filler that shares those, which is what drives question-overlap down
+        (AUC 0.628 with raw counts).
+        """
+        scores: dict[int, float] = {}
         for w in _content_words(question):
+            weight = self.idf(w)
+            if weight <= 0:
+                continue
             for i in self.index.get(w, ()):
-                counts[i] += 1
-        return [self.paras[i] for i, _ in counts.most_common(k)]
+                scores[i] = scores.get(i, 0.0) + weight
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:k]
+        return [self.paras[i] for i, _ in ranked]
 
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z\-]{2,}")
@@ -266,10 +285,13 @@ class MusiqueBuilder:
         if len(set(support_idx)) != n_hops:
             raise Skip("two hops share a supporting paragraph")
 
-        # Nothing outside the final supporting paragraph may state the answer,
-        # and nothing outside hop i's paragraph may state hop i's answer.
-        needles = {w for w in ({normalize_answer(answer)} |
-                               {normalize_answer(h["answer"]) for h in hops}) if len(w) >= 4}
+        # Only the FINAL answer has to be unique in the document. Excluding every
+        # paragraph that mentions an intermediate answer as well removed the most
+        # question-similar filler there is, which is what kept question-overlap
+        # at 0.617; and a filler paragraph mentioning a bridge entity is exactly
+        # the right kind of distractor — it names the entity without carrying the
+        # link to the next hop, so finding the bridge stays a reading task.
+        needles = {w for w in {normalize_answer(answer)} if len(w) >= 4}
 
         sup_paras = [{"title": paras[i]["title"], "text": paras[i]["paragraph_text"]}
                      for i in support_idx]

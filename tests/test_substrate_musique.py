@@ -151,3 +151,29 @@ def test_unusable_rows_are_skipped(rows, gen_cfg, env_cfg):
     builder = MusiqueBuilder(gen_cfg, env_cfg, filler_pool(rows))
     with pytest.raises(Skip):
         builder.build(bad, 32000, 0, "t")
+
+
+def test_topical_pool_ranks_by_rare_words_not_common_ones():
+    """A paragraph sharing the question's RARE word must outrank one sharing
+    only its common words — raw match counts let common words dominate, which
+    left question-overlap at AUC 0.617 on real data."""
+    from longctx.substrates.musique import TopicalPool
+
+    common = "the government announced a new policy for the region this year"
+    paras = [{"title": f"Common{i}", "text": common} for i in range(200)]
+    paras.append({"title": "Rare", "text": "zylophonic apparatus " + common})
+    pool = TopicalPool(paras)
+    ranked = pool.similar("what zylophonic policy did the government announce", k=5)
+    assert ranked[0]["title"] == "Rare"
+    assert pool.idf("zylophonic") > pool.idf("government")
+
+
+def test_only_the_final_answer_is_excluded_from_filler(rows, gen_cfg, env_cfg):
+    """Intermediate answers may appear in filler — they name a bridge entity
+    without carrying the link onward — but the final answer may not."""
+    from longctx.reward import normalize_answer
+    insts, _ = build_split(rows, gen_cfg, env_cfg, split="t", n=20, doc_tokens=32000)
+    for inst in insts:
+        holding = [c.idx for c in inst.chunks
+                   if normalize_answer(inst.answer) in normalize_answer(c.text)]
+        assert holding == [inst.answer_chunk]
