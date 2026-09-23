@@ -438,6 +438,41 @@ unavailable — `validate_real` checks what it can (evidence present, separation
 the answer present in the final evidence chunk and nowhere else) and the rest
 rests on the dataset's annotations.
 
+### Verdict: rejected as a training substrate
+
+The gate was stated before the numbers were seen, and MuSiQue fails it twice
+(Qwen2.5-7B-Instruct, reasoning prompt, 500 held-out instances at 2/3/4 hops):
+
+| | no-read | single-chunk | full-document | single-chunk as % of ceiling |
+|---|---|---|---|---|
+| synthetic | 0.000 | 0.010 | **0.795** | **1.3%** |
+| MuSiQue | 0.038 | 0.122 | **0.374** | **33%** |
+
+*The ceiling is not high.* 0.374 overall and 0.245 at 4 hops, against the
+requirement that the full-document oracle score high — an environment whose
+evidence-in-hand condition is below 0.4 has too little headroom to measure a
+navigation policy in. *And one chunk carries too much.* Single-chunk reaches a
+third of the ceiling (0.095 vs 0.245 at 4 hops), where the synthetic substrate
+is at 1.3%; that is the single-hop shortcut the environment exists to exclude.
+
+Two contributing factors, both measured rather than assumed: the model abstains
+on **26% of full-document questions** even with every required paragraph in
+front of it, and exact match against MuSiQue's answer aliases under-counts
+natural-language spans relative to the synthetic substrate's exact codes. Both
+depress the ceiling; neither is something the layout can fix.
+
+**What the investigation was worth.** Five distinct confounds were found and
+removed before this point, each one blocking the build
+([`docs/LESSONS.md`](docs/LESSONS.md) #12) — off-topic padding (question-overlap
+AUC 0.811), two different chunk-construction procedures (n_entries 0.671), entry
+count (0.587), chunk length (0.182), and a stratification bug that made every
+built instance 2-hop. The final layout reaches chance on every surface feature
+except question-overlap (0.565 on 2,000 train instances against a 0.56 gate),
+which is irreducible in natural-language QA: the paragraph that answers a
+question is the text most similar to it. That residual is *why* the single-chunk
+baseline exists — and here it is the baseline, not the audit, that rejects the
+substrate. The synthetic substrate remains the training set.
+
 ## What went wrong along the way
 
 Every failed run, its actual cause, the fix and the transferable rule is in
