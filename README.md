@@ -15,8 +15,12 @@ audit exist so that the answer is trustworthy in either direction.
 trainers, evaluation and the ARC launchers are built and tested (`pytest`: 100 tests, no GPU).
 Everything model-free has been run and is reported, and so have the **LLM baselines and the
 untrained base model through the environment** (Qwen2.5-7B-Instruct, one A100). **SFT has been run
-and evaluated** (in-distribution 0.630, OOD 0.050 — see [Results so far](#results-so-far)); GRPO
-is pending. Nothing in this file is a
+and evaluated** (in-distribution 0.630, OOD 0.050; see [Results so far](#results-so-far)). **A first
+full GRPO run (LoRA lr 1e-5) has been run and evaluated, and it did not move the policy**: at
+steps 20, 40 and 60 every held-out accuracy difference from SFT is inside ~2 standard errors, while
+OOD ceiling violations rose above SFT's 0.017 at every snapshot. It is kept as a control (see
+[GRPO, first full run](#grpo-first-full-run-lora-lr-1e-5-the-policy-did-not-move)); a GRPO run at a
+higher learning rate is pending. Nothing in this file is a
 placeholder; every number came from a command listed next to it.
 
 ---
